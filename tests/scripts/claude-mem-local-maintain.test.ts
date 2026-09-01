@@ -170,6 +170,25 @@ describe('claude-mem-local-maintain', () => {
     expect(readFileSync(join(fixture.stateDir, 'last-failure'), 'utf8')).toContain('\tdeploy-deferred\t');
   });
 
+  it('reads queue state from the newest worker log across a date rollover', () => {
+    const fixture = createFixture();
+    const dataDir = join(fixture.root, 'worker-data');
+    const logsDir = join(dataDir, 'logs');
+    mkdirSync(logsDir, { recursive: true });
+    writeFileSync(
+      join(logsDir, 'claude-mem-2000-01-01.log'),
+      '[2000-01-01 23:59:59.000] [INFO ] [WORKER] Broadcasting processing status {isProcessing=false, queueDepth=0, activeSessions=1}\n'
+    );
+    const env = maintenanceEnv(fixture);
+    delete env.CLAUDE_MEM_WORKER_STATUS_HOOK;
+    env.CLAUDE_MEM_DATA_DIR = dataDir;
+
+    const result = run(['/bin/bash', SCRIPT, '--apply'], fixture.forkRoot, env);
+
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(fixture.commandLog, 'utf8')).toBe('verify\ndeploy\n');
+  });
+
   it('does no redundant work when the verified head is already deployed', () => {
     const fixture = createFixture();
     const env = maintenanceEnv(fixture);

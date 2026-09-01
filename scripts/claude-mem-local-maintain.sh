@@ -94,9 +94,20 @@ read_worker_status() {
     "$worker_status_hook"
     return
   fi
-  local log_file
-  log_file="$data_dir/logs/claude-mem-$(date -u +%F).log"
-  [[ -f "$log_file" ]] || return 1
+  local log_file=""
+  local newest_mtime=-1
+  local candidate_log
+  local candidate_mtime
+  shopt -s nullglob
+  for candidate_log in "$data_dir"/logs/claude-mem-*.log; do
+    candidate_mtime="$(stat -c %Y "$candidate_log")"
+    if (( candidate_mtime > newest_mtime )); then
+      newest_mtime="$candidate_mtime"
+      log_file="$candidate_log"
+    fi
+  done
+  shopt -u nullglob
+  [[ -n "$log_file" ]] || return 1
   grep -E '^\[[0-9-]+ [0-9:.]+\] \[INFO \] \[WORKER\] Broadcasting processing status' "$log_file" | tail -n 1
 }
 
