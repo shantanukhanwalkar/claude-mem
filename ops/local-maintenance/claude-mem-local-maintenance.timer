@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily maintenance for the personal claude-mem fork
+
+[Timer]
+OnCalendar=*-*-* 04:15:00 Asia/Kolkata
+RandomizedDelaySec=15m
+Persistent=true
+Unit=claude-mem-local-maintenance.service
+
+[Install]
+WantedBy=timers.target

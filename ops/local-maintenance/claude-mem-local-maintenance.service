@@ -1,0 +1,25 @@
+[Unit]
+Description=Maintain and safely deploy the personal claude-mem fork
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=CLAUDE_MEM_FORK_ROOT=@SOURCE_ROOT@
+Environment=CLAUDE_MEM_LOCAL_BRANCH=local/observation-grounding
+Environment=CLAUDE_MEM_UPSTREAM_REF=upstream/main
+Environment=PATH=/home/sk/.bun/bin:/home/sk/.nvm/versions/node/v24.13.0/bin:/home/sk/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=@MAINTAINER@ --apply
+TimeoutStartSec=45min
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@SOURCE_ROOT@ /home/sk/.local /home/sk/.claude /home/sk/.codex
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=default.target
