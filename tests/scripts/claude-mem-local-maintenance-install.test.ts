@@ -24,10 +24,12 @@ describe('claude-mem local maintenance installer', () => {
     tempRoots.push(tempRoot);
     const systemdDir = join(tempRoot, 'systemd');
     const localBinDir = join(tempRoot, 'bin');
+    const durableForkDir = join(tempRoot, 'durable-fork');
     const fakeBin = join(tempRoot, 'fake-bin');
     const commandLog = join(tempRoot, 'systemctl.log');
     mkdirSync(systemdDir);
     mkdirSync(localBinDir);
+    mkdirSync(durableForkDir);
     mkdirSync(fakeBin);
     writeExecutable(join(fakeBin, 'systemctl'), 'printf "%s\\n" "$*" >> "$COMMAND_LOG"');
 
@@ -38,6 +40,7 @@ describe('claude-mem local maintenance installer', () => {
         PATH: `${fakeBin}:${process.env.PATH}`,
         COMMAND_LOG: commandLog,
         CLAUDE_MEM_SOURCE_ROOT: ROOT,
+        CLAUDE_MEM_FORK_ROOT: durableForkDir,
         SYSTEMD_USER_DIR: systemdDir,
         LOCAL_BIN_DIR: localBinDir,
       },
@@ -54,6 +57,9 @@ describe('claude-mem local maintenance installer', () => {
 
     const service = readFileSync(join(systemdDir, 'claude-mem-local-maintenance.service'), 'utf8');
     expect(service).toContain(`ExecStart=${installedMaintainer} --apply`);
+    expect(service).toContain(`Environment=CLAUDE_MEM_FORK_ROOT=${durableForkDir}`);
+    expect(service).toContain(`ReadWritePaths=${durableForkDir} `);
+    expect(service).not.toContain(`Environment=CLAUDE_MEM_FORK_ROOT=${ROOT}`);
     expect(service).toContain('Type=oneshot');
     expect(service).toContain('TimeoutStartSec=45min');
 

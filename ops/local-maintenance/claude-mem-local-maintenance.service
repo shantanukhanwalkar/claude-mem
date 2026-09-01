@@ -5,7 +5,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-Environment=CLAUDE_MEM_FORK_ROOT=@SOURCE_ROOT@
+Environment=CLAUDE_MEM_FORK_ROOT=@FORK_ROOT@
 Environment=CLAUDE_MEM_LOCAL_BRANCH=local/observation-grounding
 Environment=CLAUDE_MEM_UPSTREAM_REF=upstream/main
 Environment=PATH=/home/sk/.bun/bin:/home/sk/.nvm/versions/node/v24.13.0/bin:/home/sk/.local/bin:/usr/local/bin:/usr/bin:/bin
@@ -17,7 +17,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=@SOURCE_ROOT@ /home/sk/.local /home/sk/.claude /home/sk/.codex
+ReadWritePaths=@FORK_ROOT@ /home/sk/.local /home/sk/.claude /home/sk/.codex
 RestrictSUIDSGID=true
 LockPersonality=true
 
