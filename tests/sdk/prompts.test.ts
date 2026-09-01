@@ -1,6 +1,46 @@
 import { describe, expect, it } from 'bun:test';
 
-import { buildObservationPrompt } from '../../src/sdk/prompts.js';
+import codeMode from '../../plugin/modes/code.json';
+import {
+  buildContinuationPrompt,
+  buildInitPrompt,
+  buildObservationPrompt,
+} from '../../src/sdk/prompts.js';
+
+const mode = codeMode as any;
+
+describe('observer evidence boundaries', () => {
+  it('marks user requests as intent rather than evidence of completed work', () => {
+    const initPrompt = buildInitPrompt('project', 'session', 'merge PR 207', mode);
+    const continuationPrompt = buildContinuationPrompt('close Jira', 2, 'session', mode);
+
+    for (const prompt of [initPrompt, continuationPrompt]) {
+      expect(prompt).toContain('USER REQUESTS ARE INTENT, NOT EVIDENCE');
+      expect(prompt).toContain('Never claim requested work started, succeeded, changed state, or completed');
+      expect(prompt).toContain('tool outcome explicitly proves it');
+    }
+  });
+
+  it('requires outcome evidence and filters bookkeeping from tool observations', () => {
+    const prompt = buildObservationPrompt({
+      id: 1,
+      tool_name: 'exec_command',
+      tool_input: JSON.stringify({ cmd: 'gh pr merge 207' }),
+      tool_output: JSON.stringify({ output: 'merge failed' }),
+      created_at_epoch: Date.now(),
+      cwd: '/repo',
+    });
+
+    expect(prompt).toContain('PARAMETERS ARE INTENT; OUTCOME IS EVIDENCE');
+    expect(prompt).toContain('Never claim success from parameters alone');
+    expect(prompt).toContain('Skip agent bookkeeping');
+    expect(prompt).toContain('skill reads, collaboration waits/messages/follow-ups');
+    expect(prompt).toContain('Skip a finding already present in the conversation history');
+    expect(prompt).toContain('Pull request creation, branch pushes, Jira transitions, documentation, and configuration are change events, not features');
+    expect(prompt).toContain('Return exactly <skip_observation /> when this tool use should be skipped');
+    expect(prompt).not.toContain('or an empty response if this tool use should be skipped');
+  });
+});
 
 describe('buildObservationPrompt', () => {
   it('instructs the observer to avoid prose skip responses', () => {
@@ -13,7 +53,7 @@ describe('buildObservationPrompt', () => {
       cwd: '/repo',
     });
 
-    expect(prompt).toContain('Return either one or more <observation>...</observation> blocks, or an empty response');
+    expect(prompt).toContain('Return either one or more <observation>...</observation> blocks. Return exactly <skip_observation /> when this tool use should be skipped');
     expect(prompt).toContain('Concrete debugging findings from logs, queue state, database rows, session routing, or code-path inspection');
     expect(prompt).toContain('Never reply with prose such as "Skipping", "No substantive tool executions"');
   });

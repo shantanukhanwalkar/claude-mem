@@ -409,6 +409,21 @@ export async function processAgentResponse(
   session.consecutiveInvalidOutputs = 0;
   session.consecutiveContextOverflows = 0;
 
+  if (parsed.skipObservation) {
+    await sessionManager.confirmClaimedMessages(session.sessionDbId);
+    session.earliestPendingTimestamp = null;
+    session.pendingAgentId = null;
+    session.pendingAgentType = null;
+    session.lastUsage = null;
+    session.lastPromptSentAt = null;
+    recordObserverSuccess();
+    worker?.broadcastProcessingStatus?.();
+    logger.debug('PARSER', `${agentName} explicitly skipped a non-durable observation`, {
+      sessionId: session.sessionDbId,
+    });
+    return;
+  }
+
   if (!session.memorySessionId) {
     logger.warn('SDK', 'memorySessionId not yet captured; deferring storage until next round', {
       sessionId: session.sessionDbId

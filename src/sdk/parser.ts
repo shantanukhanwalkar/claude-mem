@@ -35,7 +35,7 @@ export interface ParsedSummary {
 }
 
 export type ParseResult =
-  | { valid: true; observations: ParsedObservation[]; summary: ParsedSummary | null }
+  | { valid: true; observations: ParsedObservation[]; summary: ParsedSummary | null; skipObservation?: boolean }
   | { valid: false };
 
 export function parseAgentXml(raw: string, correlationId?: string | number): ParseResult {
@@ -44,6 +44,16 @@ export function parseAgentXml(raw: string, correlationId?: string | number): Par
   }
 
   raw = stripCodeFences(raw);
+
+  const observationSkipMatch = /<skip_observation(?:\s+reason="([^"]*)")?\s*\/>/.exec(raw);
+  if (observationSkipMatch) {
+    return {
+      valid: true,
+      observations: [],
+      summary: null,
+      skipObservation: true,
+    };
+  }
 
   const skipMatch = /<skip_summary(?:\s+reason="([^"]*)")?\s*\/>/.exec(raw);
   if (skipMatch) {

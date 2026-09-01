@@ -903,6 +903,32 @@ describe('ResponseProcessor', () => {
   });
 
   describe('handling empty / non-XML response', () => {
+    it('confirms an explicit observation skip without storing or warning', async () => {
+      const confirmClaimedMessages = mock(() => Promise.resolve(1));
+      mockSessionManager = {
+        getMessageIterator: async function* () { yield* []; },
+        confirmClaimedMessages,
+      } as unknown as SessionManager;
+
+      const session = createMockSession({ earliestPendingTimestamp: 1700000000000 });
+
+      await processAgentResponse(
+        '<skip_observation reason="agent bookkeeping"/>',
+        session,
+        mockDbManager,
+        mockSessionManager,
+        mockWorker,
+        100,
+        null,
+        'Gemini'
+      );
+
+      expect(confirmClaimedMessages).toHaveBeenCalledWith(1);
+      expect(mockStoreObservations).not.toHaveBeenCalled();
+      expect(session.earliestPendingTimestamp).toBeNull();
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
     it('clears pending work and does NOT call storeObservations on empty response', async () => {
       const confirmClaimedMessages = mock(() => Promise.resolve(0));
       mockSessionManager = {

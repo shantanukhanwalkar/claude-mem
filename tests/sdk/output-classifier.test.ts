@@ -24,6 +24,10 @@ describe('classifyObserverOutput (plan-11 #2485)', () => {
     expect(classifyObserverOutput('<skip_summary reason="nothing to do"/>')).toBe('xml');
   });
 
+  it('classifies <skip_observation/> as xml', () => {
+    expect(classifyObserverOutput('<skip_observation reason="routine bookkeeping"/>')).toBe('xml');
+  });
+
   it('classifies empty string as idle', () => {
     expect(classifyObserverOutput('')).toBe('idle');
   });

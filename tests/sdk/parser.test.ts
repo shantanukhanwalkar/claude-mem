@@ -34,6 +34,17 @@ afterEach(() => {
 });
 
 describe('parseAgentXml — observations', () => {
+  it('treats <skip_observation/> as a valid observation no-op', () => {
+    const result = parseAgentXml('<skip_observation reason="agent bookkeeping"/>');
+
+    expect(result.valid).toBe(true);
+    if (result.valid) {
+      expect(result.skipObservation).toBe(true);
+      expect(result.observations).toEqual([]);
+      expect(result.summary).toBeNull();
+    }
+  });
+
   it('returns a populated observation when title is present', () => {
     const xml = `<observation>
       <type>discovery</type>
