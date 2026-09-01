@@ -4,7 +4,7 @@
 
 **Goal:** Preserve the local observation-grounding patch in a personal GitHub fork and automatically rebase, verify, deploy, and cache-bust it whenever upstream claude-mem advances.
 
-**Architecture:** A durable clone at `/home/sk/development/tools/claude-mem` owns the local branch and has `origin` set to the personal fork plus `upstream` set to `thedotmack/claude-mem`. A fail-closed maintenance script rebases a detached candidate worktree, runs the project quality gates, pushes only verified history, and deploys only when the live worker queue is idle. A persistent user-systemd timer invokes the script daily; conflicts, test failures, busy queues, and deployment failures leave the currently running cache untouched.
+**Architecture:** A durable clone at `/home/sk/development/tools/claude-mem` stays checked out on clean `main`, owns a free local patch branch, and has `origin` set to the personal fork plus `upstream` set to `thedotmack/claude-mem`. A fail-closed maintainer installed at `/home/sk/.local/bin/claude-mem-local-maintain` rebases a detached candidate worktree, runs the project quality gates, pushes only verified history, and deploys only when the live worker queue is idle. A persistent user-systemd timer invokes the installed maintainer daily; conflicts, test failures, busy queues, and deployment failures leave the currently running cache untouched.
 
 **Tech Stack:** Git/GitHub CLI, Bash, Bun tests/build, Codex plugin CLI, systemd user services, jq, curl, flock.
 
@@ -191,6 +191,7 @@ feat(local): automate upstream rebase and safe plugin deployment
 - Create: `ops/local-maintenance/claude-mem-local-maintenance.timer`
 - Create: `ops/local-maintenance/install.sh`
 - Create: `tests/scripts/claude-mem-local-maintenance-install.test.ts`
+- Create at deployment: `/home/sk/.local/bin/claude-mem-local-maintain`
 - Create at deployment: `/home/sk/.config/systemd/user/claude-mem-local-maintenance.service`
 - Create at deployment: `/home/sk/.config/systemd/user/claude-mem-local-maintenance.timer`
 
@@ -204,7 +205,7 @@ Run `install.sh` against a temporary `SYSTEMD_USER_DIR`, then assert unit conten
 
 - [ ] **Step 2: Run RED, implement units and installer, then run GREEN**
 
-The service must be `Type=oneshot`, use the durable clone script with `--apply`, set `TimeoutStartSec=45min`, and harden writes to the user home while retaining required network access. The installer copies units atomically, runs `systemctl --user daemon-reload`, and enables/starts the timer.
+The service must be `Type=oneshot`, run `/home/sk/.local/bin/claude-mem-local-maintain --apply`, set `TimeoutStartSec=45min`, and harden writes to the user home while retaining required network access. The installer copies the maintainer and units atomically, runs `systemctl --user daemon-reload`, and enables/starts the timer.
 
 - [ ] **Step 3: Install and verify the live timer**
 
