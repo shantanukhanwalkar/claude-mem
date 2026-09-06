@@ -1,8 +1,8 @@
 # Maintained local claude-mem — HAR-977
 
-Baseline: upstream v13.24.1. Local release: 13.24.2-local.1. Runtime provider: Claude CLI/OAuth, Sonnet 4.5. Both Claude and Codex feed one shared worker on 127.0.0.1:37777. This background inference uses the Claude subscription, including when the foreground client is Codex.
+Baseline: upstream v13.24.1. Local release: 13.24.2-local.2. Runtime provider: Claude CLI/OAuth, Sonnet 4.5. Both Claude and Codex feed one shared worker on 127.0.0.1:37777. This background inference uses the Claude subscription, including when the foreground client is Codex.
 
-The local release restores evidence grounding and explicit observation skips, ignores init-only completion claims, removes model-based oversized-field condensation, and refreshes/ expires quota windows. Tool fields retain bounded head/tail excerpts with explicit elision; omitted text must not be inferred. Actual observation/summary inference still costs usage and real provider limits still pause capture.
+The local release keeps durable memory-session foreign keys intact across SDK recycle/startup, and preserves work on startup failures. It restores evidence grounding and explicit observation skips, ignores init-only completion claims, removes model-based oversized-field condensation, and refreshes/ expires quota windows. Tool fields retain bounded head/tail excerpts with explicit elision; omitted text must not be inferred. Actual observation/summary inference still costs usage and real provider limits still pause capture.
 
 ## Installation identity and updates
 
