@@ -71,6 +71,10 @@ function validateReceipt(receipt, result) {
   if (typeof receipt.knownMarketplacesPath !== 'string' || receipt.knownMarketplacesPath.length === 0) {
     result.errors.push('deployment receipt knownMarketplacesPath must be a non-empty string');
   }
+  if (receipt.installedPluginsPath !== undefined &&
+      (typeof receipt.installedPluginsPath !== 'string' || receipt.installedPluginsPath.length === 0)) {
+    result.errors.push('deployment receipt installedPluginsPath must be a non-empty string when provided');
+  }
   if (receipt.sourceRoot !== undefined &&
       (typeof receipt.sourceRoot !== 'string' || receipt.sourceRoot.length === 0)) {
     result.errors.push('deployment receipt sourceRoot must be a non-empty string when provided');
@@ -179,6 +183,46 @@ function checkInstallRoot(result, name, root, receipt) {
   );
 }
 
+function checkActiveClaudeInstall(result, receipt) {
+  const installedPluginsPath = receipt.installedPluginsPath || path.join(
+    path.dirname(receipt.knownMarketplacesPath),
+    'installed_plugins.json',
+  );
+  const installedPlugins = readJsonDocument(
+    installedPluginsPath,
+    'installed_plugins.json',
+    result,
+  );
+  if (!installedPlugins) return;
+
+  const entries = installedPlugins.plugins?.['claude-mem@thedotmack'];
+  const userEntry = Array.isArray(entries)
+    ? entries.find((entry) => entry && entry.scope === 'user')
+    : undefined;
+  if (!userEntry) {
+    result.errors.push(
+      'installed_plugins.json has no user-scoped claude-mem@thedotmack entry ' +
+      `at ${installedPluginsPath}`,
+    );
+    return;
+  }
+
+  addComparison(
+    result,
+    'active Claude install path',
+    receipt.installationRoots.claude,
+    userEntry.installPath,
+    'active Claude install path',
+  );
+  addComparison(
+    result,
+    'active Claude version',
+    receipt.version,
+    userEntry.version,
+    'active Claude version',
+  );
+}
+
 function auditLocalInstall(receiptPath) {
   const result = emptyResult(receiptPath);
   const receipt = readJsonDocument(receiptPath, 'deployment receipt', result);
@@ -217,6 +261,7 @@ function auditLocalInstall(receiptPath) {
       );
     }
   }
+  checkActiveClaudeInstall(result, receipt);
 
   result.ok = result.errors.length === 0;
   return result;

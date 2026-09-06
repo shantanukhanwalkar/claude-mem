@@ -25,6 +25,7 @@ type Fixture = {
   receiptPath: string;
   installationRoots: Record<'claude' | 'codex' | 'marketplace', string>;
   knownMarketplacesPath: string;
+  installedPluginsPath: string;
 };
 
 const roots: string[] = [];
@@ -67,6 +68,21 @@ function makeFixture(): Fixture {
       autoUpdate: false,
     },
   });
+  const installedPluginsPath = join(root, 'installed_plugins.json');
+  json(installedPluginsPath, {
+    version: 2,
+    plugins: {
+      'claude-mem@thedotmack': [
+        {
+          scope: 'user',
+          installPath: installationRoots.claude,
+          version: VERSION,
+          installedAt: '2026-09-07T00:00:00.000Z',
+          lastUpdated: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+    },
+  });
 
   const receiptPath = join(root, 'deployment.json');
   json(receiptPath, {
@@ -78,7 +94,13 @@ function makeFixture(): Fixture {
     knownMarketplacesPath,
   });
 
-  return { root, receiptPath, installationRoots, knownMarketplacesPath };
+  return {
+    root,
+    receiptPath,
+    installationRoots,
+    knownMarketplacesPath,
+    installedPluginsPath,
+  };
 }
 
 function snapshotTree(root: string, relative = ''): unknown[] {
@@ -179,6 +201,30 @@ describe('auditLocalInstall', () => {
     }
   });
 
+  it('rejects preserved receipt files when Claude registers a different active install', async () => {
+    const { auditLocalInstall } = await import(SCRIPT);
+    const fixture = makeFixture();
+    json(fixture.installedPluginsPath, {
+      version: 2,
+      plugins: {
+        'claude-mem@thedotmack': [
+          {
+            scope: 'user',
+            installPath: join(fixture.root, 'newer-claude-cache'),
+            version: '13.24.3',
+          },
+        ],
+      },
+    });
+
+    const result = auditLocalInstall(fixture.receiptPath);
+
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toContain('active Claude install path mismatch');
+    expect(result.errors.join('\n')).toContain(fixture.installationRoots.claude);
+    expect(result.errors.join('\n')).toContain('active Claude version mismatch');
+  });
+
   it('returns actionable failures for missing and corrupt receipts', async () => {
     const { auditLocalInstall } = await import(SCRIPT);
     const root = mkdtempSync(join(tmpdir(), 'claude-mem-install-audit-'));
@@ -203,6 +249,7 @@ describe('auditLocalInstall', () => {
       { field: 'commit', value: 'short', expected: 'commit must be a full 40-hex Git commit' },
       { field: 'workerSha256', value: 'bad', expected: 'workerSha256 must be a 64-hex SHA-256' },
       { field: 'knownMarketplacesPath', value: '', expected: 'knownMarketplacesPath must be a non-empty string' },
+      { field: 'installedPluginsPath', value: '', expected: 'installedPluginsPath must be a non-empty string' },
     ] as const;
 
     for (const testCase of cases) {
@@ -260,6 +307,37 @@ describe('auditLocalInstall', () => {
     const corruptConfigResult = auditLocalInstall(corruptConfig.receiptPath);
     expect(corruptConfigResult.ok).toBe(false);
     expect(corruptConfigResult.errors.join('\n')).toContain('known_marketplaces.json is not valid JSON');
+  });
+
+  it('requires readable installed plugin metadata with a user-scoped entry', async () => {
+    const { auditLocalInstall } = await import(SCRIPT);
+
+    const missing = makeFixture();
+    unlinkSync(missing.installedPluginsPath);
+    const missingResult = auditLocalInstall(missing.receiptPath);
+    expect(missingResult.ok).toBe(false);
+    expect(missingResult.errors.join('\n')).toContain('installed_plugins.json is missing');
+
+    const corrupt = makeFixture();
+    write(corrupt.installedPluginsPath, '{bad json');
+    const corruptResult = auditLocalInstall(corrupt.receiptPath);
+    expect(corruptResult.ok).toBe(false);
+    expect(corruptResult.errors.join('\n')).toContain('installed_plugins.json is not valid JSON');
+
+    const noUserEntry = makeFixture();
+    json(noUserEntry.installedPluginsPath, {
+      version: 2,
+      plugins: {
+        'claude-mem@thedotmack': [
+          { scope: 'project', installPath: noUserEntry.installationRoots.claude, version: VERSION },
+        ],
+      },
+    });
+    const noUserEntryResult = auditLocalInstall(noUserEntry.receiptPath);
+    expect(noUserEntryResult.ok).toBe(false);
+    expect(noUserEntryResult.errors.join('\n')).toContain(
+      'installed_plugins.json has no user-scoped claude-mem@thedotmack entry',
+    );
   });
 
   it('verifies an optional source checkout commit and built worker hash', async () => {
@@ -323,7 +401,7 @@ describe('audit-local-install CLI', () => {
     expect(result.stdout).toContain('claude-mem local installation audit passed');
     expect(result.stdout).toContain(`version ${VERSION}`);
     expect(result.stdout).toContain(COMMIT);
-    expect(result.stdout).toContain('10 checks passed');
+    expect(result.stdout).toContain('12 checks passed');
     expect(result.stderr).toBe('');
   });
 
