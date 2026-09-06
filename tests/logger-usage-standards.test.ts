@@ -40,6 +40,7 @@ const EXCLUDED_PATTERNS = [
   /worker\/knowledge\/CorpusRenderer\.ts$/,  // Pure string/markdown rendering, no side effects
   /worker\/http\/middleware\/validateBody\.ts$/,  // Trivial zod validation middleware factory
   /worker\/RateLimitStore\.ts$/,  // Side-effect-free in-memory rate-limit store
+  /worker\/field-optimizer\.ts$/,  // Pure compatibility pass-through; prompt construction owns deterministic field bounds
   /worker\/events\/SessionEventBroadcaster\.ts$/,  // Thin SSE broadcast wrapper, no error paths
   /sdk\/output-classifier\.ts$/,  // Pure, side-effect-free output classifier; logging happens at the ResponseProcessor call site with full session context
   /build\/hook-shell-template\.ts$/,  // Pure build-time shell-string generator (no runtime/observability surface); drift is enforced by build-hooks.js + plugin-distribution.test.ts

@@ -15,7 +15,7 @@ Adopting upstream is an explicit maintenance task:
 1. Create an isolated candidate from local/stable, select a released upstream tag, and reconcile source changes. Rebuild generated files after resolving source conflicts; do not resolve bundle conflicts by blindly choosing upstream bytes.
 2. Run worker, SDK, provider, audit and integration tests; run root/viewer type checks; build. Review grounding, payload bounds, quota freshness and worker resolution together.
 3. Give the local patch a coherent version in package/plugin/marketplace manifests. The hook resolver prefers a normal release over a prerelease at the same numeric version, so the first local patch uses 13.24.2-local.1 to outrank upstream 13.24.1. Codex build metadata is only a reinstall cachebuster.
-4. Back up installation metadata/settings and the current receipt; use SQLite's backup API for a consistent database snapshot if needed. Preserve pending messages and quota cooldowns.
+4. Back up installation metadata/settings and the current receipt; use SQLite's backup API for a consistent database snapshot if needed. This upstream baseline holds its active observation queue in RAM: the legacy SQLite pending_messages table is not that queue. Normally wait for /api/processing-status queueDepth=0 before restarting. If a broken worker cannot drain, first preserve the original Claude/Codex transcripts and identify the pending interval for controlled recovery. A SQLite backup alone does not preserve in-flight work. Preserve quota cooldowns.
 5. Install the reviewed build to the marketplace and Claude cache, reinstall Codex from its confirmed local marketplace, and ensure automatic upstream updates remain disabled. Check every installed worker hash and manifest before restart.
 6. Restart through the worker API. Verify the new PID/version/readiness, successful post-deployment observation capture and retrieval, and no new condensation calls. Only then replace the deployment receipt and update HAR-977/provider records.
 
@@ -25,7 +25,7 @@ Keep the prior reviewed source commit and deployment receipt. Restore its genera
 
 ## Operational checks
 
-`GET /api/health` must report the receipt's version and one initialized worker. `/api/processing-status` describes active processing, while SQLite queue counts can include stranded/inactive session work and need separate interpretation. A successful HTTP health response alone does not prove memory capture: check a new observation row and retrieve it through search.
+`GET /api/health` must report the receipt's version and one initialized worker. `/api/processing-status` describes the active RAM queue; SQLite pending_messages rows are legacy work and must not be reported as the current buffer. A successful HTTP health response alone does not prove memory capture: check a new observation row and retrieve it through search. Generic stream failures pause with buffered work retained during the process lifetime; there is no automatic retry loop. The next normal ingest may resume it.
 
 For quota pauses compare the newest unified windows and timestamps, rather than an old isolated utilization reading. Real exhaustion requires waiting for reset; restarting is not a way to bypass it. The stale snapshot defect fixed here was different: its expired window continued to block healthy usage. Persisted cooldown state is preserved during deployment.
 
