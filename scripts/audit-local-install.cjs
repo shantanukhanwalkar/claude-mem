@@ -47,6 +47,11 @@ function readJsonDocument(filePath, label, result) {
   }
 }
 
+function readOptionalJsonDocument(filePath, label, result) {
+  if (!fs.existsSync(filePath)) return undefined;
+  return readJsonDocument(filePath, label, result);
+}
+
 function addComparison(result, name, expected, actual, errorLabel) {
   const ok = actual === expected;
   result.checks.push({ name, ok, expected, actual });
@@ -74,6 +79,10 @@ function validateReceipt(receipt, result) {
   if (receipt.installedPluginsPath !== undefined &&
       (typeof receipt.installedPluginsPath !== 'string' || receipt.installedPluginsPath.length === 0)) {
     result.errors.push('deployment receipt installedPluginsPath must be a non-empty string when provided');
+  }
+  if (receipt.claudeSettingsPath !== undefined &&
+      (typeof receipt.claudeSettingsPath !== 'string' || receipt.claudeSettingsPath.length === 0)) {
+    result.errors.push('deployment receipt claudeSettingsPath must be a non-empty string when provided');
   }
   if (receipt.sourceRoot !== undefined &&
       (typeof receipt.sourceRoot !== 'string' || receipt.sourceRoot.length === 0)) {
@@ -223,6 +232,47 @@ function checkActiveClaudeInstall(result, receipt) {
   );
 }
 
+function checkClaudeSettingsMarketplace(result, receipt, registeredMarketplace) {
+  const claudeSettingsPath = receipt.claudeSettingsPath || path.join(
+    path.dirname(path.dirname(receipt.knownMarketplacesPath)),
+    'settings.json',
+  );
+  const settings = readOptionalJsonDocument(claudeSettingsPath, 'Claude settings.json', result);
+  if (!settings) return;
+
+  const declaredMarketplace = settings.extraKnownMarketplaces?.thedotmack;
+  if (declaredMarketplace === undefined) return;
+  if (declaredMarketplace === null || typeof declaredMarketplace !== 'object' || Array.isArray(declaredMarketplace)) {
+    result.errors.push(
+      `settings.json extraKnownMarketplaces.thedotmack must be an object at ${claudeSettingsPath}`,
+    );
+    return;
+  }
+
+  const autoUpdateOk = declaredMarketplace.autoUpdate === false;
+  result.checks.push({
+    name: 'Claude settings marketplace auto-update disabled',
+    ok: autoUpdateOk,
+    expected: false,
+    actual: declaredMarketplace.autoUpdate,
+  });
+  if (!autoUpdateOk) {
+    result.errors.push(
+      'settings.json extraKnownMarketplaces.thedotmack.autoUpdate must be explicitly false ' +
+      `(found ${declaredMarketplace.autoUpdate === undefined ? 'missing' : JSON.stringify(declaredMarketplace.autoUpdate)})`,
+    );
+  }
+  for (const field of ['source', 'repo', 'ref']) {
+    addComparison(
+      result,
+      `Claude settings marketplace source.${field}`,
+      registeredMarketplace?.source?.[field],
+      declaredMarketplace.source?.[field],
+      `settings.json extraKnownMarketplaces.thedotmack.source.${field}`,
+    );
+  }
+}
+
 function auditLocalInstall(receiptPath) {
   const result = emptyResult(receiptPath);
   const receipt = readJsonDocument(receiptPath, 'deployment receipt', result);
@@ -260,6 +310,7 @@ function auditLocalInstall(receiptPath) {
         `(found ${autoUpdate === undefined ? 'missing' : JSON.stringify(autoUpdate)})`,
       );
     }
+    checkClaudeSettingsMarketplace(result, receipt, knownMarketplaces.thedotmack);
   }
   checkActiveClaudeInstall(result, receipt);
 

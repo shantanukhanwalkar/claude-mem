@@ -26,6 +26,7 @@ type Fixture = {
   installationRoots: Record<'claude' | 'codex' | 'marketplace', string>;
   knownMarketplacesPath: string;
   installedPluginsPath: string;
+  claudeSettingsPath: string;
 };
 
 const roots: string[] = [];
@@ -60,15 +61,19 @@ function makeFixture(): Fixture {
     write(join(installRoot, 'scripts', 'worker-service.cjs'), WORKER);
   }
 
-  const knownMarketplacesPath = join(root, 'known_marketplaces.json');
+  const knownMarketplacesPath = join(root, '.claude', 'plugins', 'known_marketplaces.json');
   json(knownMarketplacesPath, {
     thedotmack: {
-      source: { source: 'github', repo: 'thedotmack/claude-mem' },
+      source: {
+        source: 'github',
+        repo: 'shantanukhanwalkar/claude-mem',
+        ref: 'local/stable',
+      },
       installLocation: join(root, 'marketplace-root'),
       autoUpdate: false,
     },
   });
-  const installedPluginsPath = join(root, 'installed_plugins.json');
+  const installedPluginsPath = join(root, '.claude', 'plugins', 'installed_plugins.json');
   json(installedPluginsPath, {
     version: 2,
     plugins: {
@@ -81,6 +86,19 @@ function makeFixture(): Fixture {
           lastUpdated: '2026-09-07T00:00:00.000Z',
         },
       ],
+    },
+  });
+  const claudeSettingsPath = join(root, '.claude', 'settings.json');
+  json(claudeSettingsPath, {
+    extraKnownMarketplaces: {
+      thedotmack: {
+        source: {
+          source: 'github',
+          repo: 'shantanukhanwalkar/claude-mem',
+          ref: 'local/stable',
+        },
+        autoUpdate: false,
+      },
     },
   });
 
@@ -100,6 +118,7 @@ function makeFixture(): Fixture {
     installationRoots,
     knownMarketplacesPath,
     installedPluginsPath,
+    claudeSettingsPath,
   };
 }
 
@@ -201,6 +220,53 @@ describe('auditLocalInstall', () => {
     }
   });
 
+  it('rejects a Claude settings override that re-enables marketplace auto-update', async () => {
+    const { auditLocalInstall } = await import(SCRIPT);
+    const fixture = makeFixture();
+    const settings = JSON.parse(readFileSync(fixture.claudeSettingsPath, 'utf8'));
+    settings.extraKnownMarketplaces.thedotmack.autoUpdate = true;
+    json(fixture.claudeSettingsPath, settings);
+
+    const result = auditLocalInstall(fixture.receiptPath);
+
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toContain(
+      'settings.json extraKnownMarketplaces.thedotmack.autoUpdate must be explicitly false',
+    );
+  });
+
+  it('rejects a Claude settings marketplace source that disagrees with the registered source', async () => {
+    const { auditLocalInstall } = await import(SCRIPT);
+    const fixture = makeFixture();
+    const settings = JSON.parse(readFileSync(fixture.claudeSettingsPath, 'utf8'));
+    settings.extraKnownMarketplaces.thedotmack.source.repo = 'thedotmack/claude-mem';
+    settings.extraKnownMarketplaces.thedotmack.source.ref = 'main';
+    json(fixture.claudeSettingsPath, settings);
+
+    const result = auditLocalInstall(fixture.receiptPath);
+
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toContain(
+      'settings.json extraKnownMarketplaces.thedotmack.source.repo mismatch',
+    );
+    expect(result.errors.join('\n')).toContain(
+      'settings.json extraKnownMarketplaces.thedotmack.source.ref mismatch',
+    );
+  });
+
+  it('allows no settings declaration but rejects a malformed settings file', async () => {
+    const { auditLocalInstall } = await import(SCRIPT);
+    const absentDeclaration = makeFixture();
+    json(absentDeclaration.claudeSettingsPath, { theme: 'dark' });
+    expect(auditLocalInstall(absentDeclaration.receiptPath).ok).toBe(true);
+
+    const malformed = makeFixture();
+    write(malformed.claudeSettingsPath, '{bad json');
+    const malformedResult = auditLocalInstall(malformed.receiptPath);
+    expect(malformedResult.ok).toBe(false);
+    expect(malformedResult.errors.join('\n')).toContain('Claude settings.json is not valid JSON');
+  });
+
   it('rejects preserved receipt files when Claude registers a different active install', async () => {
     const { auditLocalInstall } = await import(SCRIPT);
     const fixture = makeFixture();
@@ -250,6 +316,7 @@ describe('auditLocalInstall', () => {
       { field: 'workerSha256', value: 'bad', expected: 'workerSha256 must be a 64-hex SHA-256' },
       { field: 'knownMarketplacesPath', value: '', expected: 'knownMarketplacesPath must be a non-empty string' },
       { field: 'installedPluginsPath', value: '', expected: 'installedPluginsPath must be a non-empty string' },
+      { field: 'claudeSettingsPath', value: '', expected: 'claudeSettingsPath must be a non-empty string' },
     ] as const;
 
     for (const testCase of cases) {
@@ -401,7 +468,7 @@ describe('audit-local-install CLI', () => {
     expect(result.stdout).toContain('claude-mem local installation audit passed');
     expect(result.stdout).toContain(`version ${VERSION}`);
     expect(result.stdout).toContain(COMMIT);
-    expect(result.stdout).toContain('12 checks passed');
+    expect(result.stdout).toContain('16 checks passed');
     expect(result.stderr).toBe('');
   });
 
