@@ -210,6 +210,159 @@ describe('shouldAbortForQuota — cli/oauth auth', () => {
     const decision = shouldAbortForQuota(cliAuth, store, FIXED_NOW);
     expect(decision.abort).toBe(false);
   });
+
+  it('uses a newer unified window instead of an expired high reading', () => {
+    store.set({
+      rateLimitType: 'five_hour',
+      status: 'allowed_warning',
+      utilization: 0.95,
+      resetsAt: 1_788_710_400,
+    });
+    store.set({
+      rateLimitType: 'seven_day',
+      status: 'allowed_warning',
+      utilization: 0.85,
+      resetsAt: 1_788_883_200,
+      unifiedWindows: {
+        five_hour: { utilization: 0.28, resetsAt: 1_788_730_200 },
+        seven_day: { utilization: 0.85, resetsAt: 1_788_883_200 },
+      },
+    });
+
+    expect(shouldAbortForQuota(cliAuth, store, 1_788_720_763_944)).toEqual({ abort: false });
+    expect(store.get('five_hour')?.utilization).toBe(0.28);
+  });
+
+  it('records a fresh zero utilization from a unified window', () => {
+    store.set({
+      rateLimitType: 'five_hour',
+      status: 'allowed_warning',
+      utilization: 0.96,
+      resetsAt: FIXED_NOW + 2 * 60 * 60_000,
+    });
+    store.set({
+      rateLimitType: 'seven_day',
+      status: 'allowed',
+      utilization: 0.4,
+      unifiedWindows: {
+        five_hour: { utilization: 0, resetsAt: FIXED_NOW + 5 * 60 * 60_000 },
+      },
+    });
+
+    expect(store.get('five_hour')?.utilization).toBe(0);
+    expect(shouldAbortForQuota(cliAuth, store, FIXED_NOW)).toEqual({ abort: false });
+  });
+
+  it('uses a newer unified reading when the stale sibling reset is still in the future', () => {
+    store.set({
+      rateLimitType: 'five_hour',
+      status: 'allowed_warning',
+      utilization: 0.96,
+      resetsAt: FIXED_NOW + 60 * 60_000,
+    });
+    store.set({
+      rateLimitType: 'seven_day',
+      status: 'allowed_warning',
+      utilization: 0.8,
+      unifiedWindows: {
+        five_hour: { utilization: 0.25, resetsAt: FIXED_NOW + 4 * 60 * 60_000 },
+      },
+    });
+
+    expect(shouldAbortForQuota(cliAuth, store, FIXED_NOW)).toEqual({ abort: false });
+  });
+
+  it('does not abort for an explicitly rejected window after its reset elapsed', () => {
+    store.set({
+      rateLimitType: 'five_hour',
+      status: 'rejected',
+      utilization: 1,
+      resetsAt: Math.floor(FIXED_NOW / 1000) - 1,
+    });
+
+    expect(shouldAbortForQuota(cliAuth, store, FIXED_NOW)).toEqual({ abort: false });
+  });
+
+  it('keeps an active explicit rejection despite a newer statusless unified reading', () => {
+    const now = Date.now();
+    store.set({
+      rateLimitType: 'five_hour',
+      status: 'rejected',
+      utilization: 1,
+      resetsAt: Math.floor(now / 1000) + 60 * 60,
+    });
+    store.set({
+      rateLimitType: 'seven_day',
+      status: 'allowed',
+      utilization: 0.4,
+      unifiedWindows: {
+        five_hour: { utilization: 0.1, resetsAt: Math.floor(now / 1000) + 5 * 60 * 60 },
+      },
+    });
+
+    const decision = shouldAbortForQuota(cliAuth, store, now);
+    expect(decision.abort).toBe(true);
+    expect(decision.window).toBe('five_hour');
+    expect(decision.reason).toContain('rejected by provider');
+  });
+
+  it('accepts a unified reading after an explicit rejection has expired', () => {
+    const now = Date.now();
+    store.set({
+      rateLimitType: 'five_hour',
+      status: 'rejected',
+      utilization: 1,
+      resetsAt: now - 1,
+    });
+    store.set({
+      rateLimitType: 'seven_day',
+      status: 'allowed',
+      utilization: 0.4,
+      unifiedWindows: {
+        five_hour: { utilization: 0.2, resetsAt: now + 5 * 60 * 60_000 },
+      },
+    });
+
+    expect(store.get('five_hour')?.utilization).toBe(0.2);
+    expect(shouldAbortForQuota(cliAuth, store, now)).toEqual({ abort: false });
+  });
+
+  it('ignores malformed unified window data without corrupting existing buckets', () => {
+    store.set({
+      rateLimitType: 'five_hour',
+      status: 'allowed',
+      utilization: 0.4,
+      resetsAt: FIXED_NOW + 60 * 60_000,
+    });
+    store.set({
+      rateLimitType: 'seven_day',
+      status: 'allowed',
+      utilization: 0.4,
+      unifiedWindows: {
+        five_hour: { utilization: 0.2, resetsAt: 'soon' },
+        seven_day_opus: { utilization: Number.NaN, resetsAt: FIXED_NOW + 60_000 },
+        seven_day_sonnet: null,
+        invented_window: { utilization: 1, resetsAt: FIXED_NOW + 60_000 },
+      },
+    } as unknown as RateLimitInfo);
+
+    expect(store.get('five_hour')?.utilization).toBe(0.4);
+    expect(store.get('seven_day_opus')).toBeUndefined();
+    expect(store.get('seven_day_sonnet')).toBeUndefined();
+    expect(store.size).toBe(2);
+  });
+
+  it('applies reset grace to epoch-seconds timestamps', () => {
+    store.set({
+      rateLimitType: 'five_hour',
+      utilization: 0.9,
+      resetsAt: Math.floor(FIXED_NOW / 1000) + 10 * 60,
+    });
+
+    const decision = shouldAbortForQuota(cliAuth, store, FIXED_NOW);
+    expect(decision.abort).toBe(true);
+    expect(decision.reason).toContain('resets in 10m');
+  });
 });
 
 // usage_limit_hit telemetry: one event per exhausted window, never one per

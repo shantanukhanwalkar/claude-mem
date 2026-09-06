@@ -18,6 +18,9 @@
  *     overageResetsAt?: number,
  *     isUsingOverage?: boolean,
  *     surpassedThreshold?: number,
+ *     unifiedWindows?: {
+ *       [window: string]: { utilization?: number, resetsAt?: number }
+ *     },
  *   }
  *
  * Pattern adapted from meridian's proxy/rateLimitStore.ts (last-write-wins
@@ -45,6 +48,12 @@ export interface RateLimitInfo {
   overageResetsAt?: number;
   isUsingOverage?: boolean;
   surpassedThreshold?: number;
+  unifiedWindows?: Partial<Record<RateLimitWindow, UnifiedRateLimitWindow>>;
+}
+
+export interface UnifiedRateLimitWindow {
+  utilization?: number;
+  resetsAt?: number;
 }
 
 export interface RateLimitEntry extends RateLimitInfo {
@@ -65,7 +74,28 @@ export class RateLimitStore {
     if (!info || typeof info !== 'object') return false;
     const key: RateLimitBucketKey = info.rateLimitType ?? 'default';
     const previous = this.entries.get(key);
-    this.entries.set(key, { ...info, observedAt: Date.now() });
+    const observedAt = Date.now();
+    this.entries.set(key, { ...info, observedAt });
+
+    if (info.unifiedWindows && typeof info.unifiedWindows === 'object') {
+      for (const window of RATE_LIMIT_WINDOWS) {
+        if (window === key) continue;
+
+        const unified = readUnifiedWindow(info.unifiedWindows[window]);
+        if (!unified) continue;
+
+        const existing = this.entries.get(window);
+        if (isActiveRejection(existing, window, observedAt)) continue;
+
+        this.entries.set(window, {
+          rateLimitType: window,
+          utilization: unified.utilization,
+          resetsAt: unified.resetsAt,
+          observedAt,
+        });
+      }
+    }
+
     return isNewRejection(previous, info);
   }
 
@@ -179,6 +209,14 @@ const UTILIZATION_THRESHOLDS: Record<RateLimitWindow, number> = {
   overage: 0.95,
 };
 
+const RATE_LIMIT_WINDOWS: readonly RateLimitWindow[] = [
+  'five_hour',
+  'seven_day_opus',
+  'seven_day_sonnet',
+  'seven_day',
+  'overage',
+];
+
 /** Reset-window grace: bail early if a window resets within this many ms. */
 const RESET_GRACE_MS = 15 * 60 * 1000; // 15 minutes
 /** Utilization floor before the reset-grace check kicks in. */
@@ -205,36 +243,42 @@ export function shouldAbortForQuota(
     return { abort: false };
   }
 
-  const windows: RateLimitWindow[] = [
-    'five_hour',
-    'seven_day_opus',
-    'seven_day_sonnet',
-    'seven_day',
-    'overage',
-  ];
-
-  for (const window of windows) {
+  for (const window of RATE_LIMIT_WINDOWS) {
     const entry = store.get(window);
     if (!entry) continue;
 
     const util = entry.utilization;
     const threshold = UTILIZATION_THRESHOLDS[window];
 
+    const resetsAtMs = epochMilliseconds(entry.resetsAt);
+    const entryExpired = hasElapsedReset(entry.resetsAt, now);
+
     // Provider-side rejection trumps utilization heuristics. A snapshot with
     // status='rejected' (or overageStatus='rejected' on the overage window)
-    // means the provider has already declared the bucket exhausted; we must
-    // stop regardless of whether utilization is reported.
-    const isRejected =
-      entry.status === 'rejected' ||
-      (window === 'overage' && entry.overageStatus === 'rejected');
-
-    if (isRejected) {
+    // means the provider declared the bucket exhausted. Preserve that explicit
+    // decision until its own valid reset has elapsed.
+    if (entry.status === 'rejected' && !entryExpired) {
       return {
         abort: true,
         window,
         reason: `quota:${window} rejected by provider`,
       };
     }
+
+    const overageRejectionExpired = hasElapsedReset(entry.overageResetsAt, now);
+    if (
+      window === 'overage' &&
+      entry.overageStatus === 'rejected' &&
+      !overageRejectionExpired
+    ) {
+      return {
+        abort: true,
+        window,
+        reason: `quota:${window} rejected by provider`,
+      };
+    }
+
+    if (entryExpired) continue;
 
     if (typeof util === 'number' && util >= threshold) {
       return {
@@ -249,11 +293,11 @@ export function shouldAbortForQuota(
     // bailing on a window that just reset to ~0%.
     if (
       window === 'five_hour' &&
-      typeof entry.resetsAt === 'number' &&
+      resetsAtMs !== undefined &&
       typeof util === 'number' &&
       util >= RESET_GRACE_UTILIZATION_FLOOR
     ) {
-      const msUntilReset = entry.resetsAt - now;
+      const msUntilReset = resetsAtMs - now;
       if (msUntilReset > 0 && msUntilReset <= RESET_GRACE_MS) {
         return {
           abort: true,
@@ -265,6 +309,51 @@ export function shouldAbortForQuota(
   }
 
   return { abort: false };
+}
+
+function readUnifiedWindow(value: unknown): Required<UnifiedRateLimitWindow> | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const candidate = value as UnifiedRateLimitWindow;
+  if (
+    typeof candidate.utilization !== 'number' ||
+    !Number.isFinite(candidate.utilization) ||
+    candidate.utilization < 0 ||
+    candidate.utilization > 1 ||
+    epochMilliseconds(candidate.resetsAt) === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    utilization: candidate.utilization,
+    resetsAt: candidate.resetsAt!,
+  };
+}
+
+function isActiveRejection(
+  entry: RateLimitEntry | undefined,
+  window: RateLimitWindow,
+  now: number,
+): boolean {
+  if (!entry) return false;
+  const statusRejectionActive =
+    entry.status === 'rejected' && !hasElapsedReset(entry.resetsAt, now);
+  const overageRejectionActive =
+    window === 'overage' &&
+    entry.overageStatus === 'rejected' &&
+    !hasElapsedReset(entry.overageResetsAt, now);
+  return statusRejectionActive || overageRejectionActive;
+}
+
+function hasElapsedReset(timestamp: number | undefined, now: number): boolean {
+  const timestampMs = epochMilliseconds(timestamp);
+  return timestampMs !== undefined && timestampMs <= now;
+}
+
+function epochMilliseconds(timestamp: number | undefined): number | undefined {
+  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp) || timestamp <= 0) {
+    return undefined;
+  }
+  return timestamp < 1e12 ? timestamp * 1000 : timestamp;
 }
 
 /**
