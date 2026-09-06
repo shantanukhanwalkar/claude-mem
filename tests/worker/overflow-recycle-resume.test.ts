@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach } from 'bun:test';
+import { describe, it, expect, beforeEach, spyOn } from 'bun:test';
 import type { ActiveSession } from '../../src/services/worker-types.js';
 import { resetQuotaCooldownsForTesting } from '../../src/shared/quota-cooldown.js';
 import { resetDependencyStatusesForTesting } from '../../src/shared/dependency-health.js';
+import * as observerHealth from '../../src/shared/observer-health.js';
 
 const { SessionRoutes } = await import('../../src/services/worker/http/routes/SessionRoutes.js');
 
@@ -161,6 +162,33 @@ describe('observer resumes itself after recycling its conversation (#3800)', () 
     expect(stats().finalizeCalls).toBe(0);
     expect(stats().removed).toBe(0);
     expect(stats().active).toBe(session);
+  });
+
+  it('reports a thrown stream interruption even though its controller is aborted', async () => {
+    const session = makeSession();
+    let starts = 0;
+    const recordFailure = spyOn(observerHealth, 'recordObserverFailure').mockImplementation(() => {});
+
+    try {
+      const { routes, stats } = buildRoutes(session, async () => {
+        starts += 1;
+        session.abortReason = 'stream:interrupted';
+        session.abortController.abort();
+        throw new Error('transport exploded');
+      });
+
+      await routes.ensureGeneratorRunning(session.sessionDbId, 'observation');
+      await session.generatorPromise;
+      await nextTick();
+
+      expect(starts).toBe(1);
+      expect(recordFailure).toHaveBeenCalledWith('claude', 'transport exploded');
+      expect(stats().finalizeCalls).toBe(0);
+      expect(stats().removed).toBe(0);
+      expect(stats().active).toBe(session);
+    } finally {
+      recordFailure.mockRestore();
+    }
   });
 
   it('preserves the session across a recycle instead of finalizing it', async () => {

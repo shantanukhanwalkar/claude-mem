@@ -24,25 +24,40 @@ function deferred<T>(): Deferred<T> {
 
 class AsyncQueue<T> implements AsyncIterableIterator<T> {
   private values: T[] = [];
-  private waiters: Array<(result: IteratorResult<T>) => void> = [];
+  private waiters: Array<{
+    resolve: (result: IteratorResult<T>) => void;
+    reject: (error: Error) => void;
+  }> = [];
+  private error: Error | undefined;
   private closed = false;
 
   push(value: T): void {
     const waiter = this.waiters.shift();
-    if (waiter) waiter({ value, done: false });
+    if (waiter) waiter.resolve({ value, done: false });
     else this.values.push(value);
+  }
+
+  fail(error: Error): void {
+    const waiter = this.waiters.shift();
+    if (waiter) waiter.reject(error);
+    else this.error = error;
   }
 
   close(): void {
     this.closed = true;
-    for (const waiter of this.waiters.splice(0)) waiter({ value: undefined, done: true });
+    for (const waiter of this.waiters.splice(0)) waiter.resolve({ value: undefined, done: true });
   }
 
   async next(): Promise<IteratorResult<T>> {
     const value = this.values.shift();
     if (value !== undefined) return { value, done: false };
+    if (this.error) {
+      const error = this.error;
+      this.error = undefined;
+      throw error;
+    }
     if (this.closed) return { value: undefined, done: true };
-    return new Promise(resolve => this.waiters.push(resolve));
+    return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
   }
 
   async return(): Promise<IteratorResult<T>> {
@@ -93,6 +108,7 @@ class EagerFakeQuery implements AsyncIterableIterator<any> {
 
 let activeQuery: EagerFakeQuery | undefined;
 const processed: Array<{ text: string; source?: string; claimed: number[] }> = [];
+let processError: Error | undefined;
 
 mock.module('@anthropic-ai/claude-agent-sdk', () => ({
   query: ({ prompt }: { prompt: AsyncIterable<SDKUserMessage> }) => {
@@ -155,6 +171,11 @@ mock.module('../../src/services/worker/agents/index.js', () => ({
   processAgentResponse: async (text: string, session: ActiveSession, ...args: any[]) => {
     const context = args[8] as { source?: string } | undefined;
     processed.push({ text, source: context?.source, claimed: [...session.claimedMessageIds] });
+    if (processError && context?.source !== 'init') {
+      const error = processError;
+      processError = undefined;
+      throw error;
+    }
     if (/session limit|authentication failed/i.test(text)) {
       await args[1].resetProcessingToPending(session.sessionDbId);
     } else if (context?.source !== 'init') {
@@ -556,6 +577,84 @@ describe('ClaudeProvider streaming turn ordering', () => {
     expect(finalized).toBe(0);
     expect(sessionManager.getSession(86)).toBe(session);
     expect(sessionManager.getMessageBuffer().getPendingCount(86)).toBe(1);
+  });
+
+  it('preserves a real buffered tool payload when the SDK output iterator throws', async () => {
+    processed.length = 0;
+    activeQuery = undefined;
+    const { session, sessionManager, provider } = await makeRealBufferHarness(88);
+    const run = provider.startSession(session);
+
+    while (!activeQuery) await settle();
+    await activeQuery.waitForPrompts(1);
+    activeQuery.output.push(success(''));
+    await activeQuery.waitForPrompts(2);
+    activeQuery.output.fail(new Error('socket exploded'));
+
+    await expect(within(run)).rejects.toThrow('socket exploded');
+    await within(activeQuery.inputDone);
+    expect(session.abortReason).toBe('stream:interrupted');
+    expect(session.abortController.signal.aborted).toBe(true);
+    expect(sessionManager.getMessageBuffer().getPendingCount(88)).toBe(1);
+    expect(sessionManager.getClaimedMessages(88)).toEqual([]);
+
+    let finalized = 0;
+    await handleGeneratorExit(session, session.abortReason, {
+      sessionManager,
+      completionHandler: { finalizeSession: async () => { finalized += 1; } } as any,
+    });
+    expect(finalized).toBe(0);
+    expect(sessionManager.getSession(88)).toBe(session);
+    expect(sessionManager.getMessageBuffer().getPendingCount(88)).toBe(1);
+  });
+
+  it('preserves a real buffered tool payload when response processing throws', async () => {
+    processed.length = 0;
+    processError = new Error('storage exploded');
+    activeQuery = undefined;
+    const { session, sessionManager, provider } = await makeRealBufferHarness(89);
+    const run = provider.startSession(session);
+
+    while (!activeQuery) await settle();
+    await activeQuery.waitForPrompts(1);
+    activeQuery.output.push(success(''));
+    await activeQuery.waitForPrompts(2);
+    activeQuery.output.push(success('<skip_observation />'));
+
+    await expect(within(run)).rejects.toThrow('storage exploded');
+    await within(activeQuery.inputDone);
+    expect(session.abortReason).toBe('stream:interrupted');
+    expect(session.abortController.signal.aborted).toBe(true);
+    expect(sessionManager.getMessageBuffer().getPendingCount(89)).toBe(1);
+    expect(sessionManager.getClaimedMessages(89)).toEqual([]);
+
+    let finalized = 0;
+    await handleGeneratorExit(session, session.abortReason, {
+      sessionManager,
+      completionHandler: { finalizeSession: async () => { finalized += 1; } } as any,
+    });
+    expect(finalized).toBe(0);
+    expect(sessionManager.getSession(89)).toBe(session);
+    expect(sessionManager.getMessageBuffer().getPendingCount(89)).toBe(1);
+  });
+
+  it('aborts a real message iterator waiting between turns when SDK output throws', async () => {
+    processed.length = 0;
+    activeQuery = undefined;
+    const { session, sessionManager, provider } = await makeRealBufferHarness(90, false);
+    const run = provider.startSession(session);
+
+    while (!activeQuery) await settle();
+    await activeQuery.waitForPrompts(1);
+    activeQuery.output.push(success(''));
+    await settle();
+    activeQuery.output.fail(new Error('between-turn transport failure'));
+
+    await expect(within(run)).rejects.toThrow('between-turn transport failure');
+    await within(activeQuery.inputDone);
+    expect(session.abortReason).toBe('stream:interrupted');
+    expect(session.abortController.signal.aborted).toBe(true);
+    expect(sessionManager.getSession(90)).toBe(session);
   });
 
   it('aborts a real message iterator waiting between turns when SDK output ends', async () => {

@@ -237,7 +237,13 @@ export class SessionRoutes extends BaseRouteHandler {
 
     generatorPromise = agent.startSession(session, this.workerService)
       .catch(async error => {
-        if (myController.signal.aborted) {
+        // ClaudeProvider aborts an interrupted SDK stream to release its eager
+        // input pump, but the originating exception still needs the normal
+        // classifier/log/observer-health path below. Other abort reasons were
+        // already handled at their source and retain the quiet cancellation.
+        const reportInterruptedStream =
+          provider === 'claude' && session.abortReason === 'stream:interrupted';
+        if (myController.signal.aborted && !reportInterruptedStream) {
           logger.debug('HTTP', 'Generator catch: ignoring error after abort', { sessionId: session.sessionDbId });
           return;
         }
@@ -264,16 +270,14 @@ export class SessionRoutes extends BaseRouteHandler {
           return;
         }
 
-        // No retry: the generator failed, the in-RAM batch is dropped, and the
-        // transcript is the recovery path. The next observation ingest will
-        // start a fresh generator via ensureGeneratorRunning.
+        // No automatic retry: a Claude stream interruption keeps its in-RAM
+        // batch for the next observation ingest; other unclassified generator
+        // failures retain the transcript-recovery path.
         //
         // The local error line (full fidelity) and the scrubbed
         // session_compressed rollup are one logical event.
-        // No abort_reason here: every site that sets abortReason aborts the
-        // controller on its next line, so aborted generators either resolve
-        // normally (quota/overflow break) or hit the signal-aborted early
-        // return above — this catch only ever sees non-abort rejections.
+        // stream:interrupted is the one aborted path intentionally admitted
+        // here so its originating exception remains observable.
         if (isClassified(error)) {
           // The single error-level line for a classified provider failure:
           // code, message, action, link, and request id — same words the

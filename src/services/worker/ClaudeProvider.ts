@@ -605,6 +605,12 @@ export class ClaudeProvider {
         }
       }
       reachedSdkEof = true;
+    } catch (error) {
+      if (!session.abortReason) {
+        session.abortReason = 'stream:interrupted';
+        session.abortController.abort();
+      }
+      throw error instanceof ClassifiedProviderError ? error : classifyClaudeError(error);
     } finally {
       // query() pumps the input iterable independently of its output iterator.
       // Release a generator suspended behind an unfinished turn on every exit.
