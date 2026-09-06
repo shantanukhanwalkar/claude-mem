@@ -290,6 +290,20 @@ describe('ResponseProcessor', () => {
       expect(observations[1].type).toBe('bugfix');
     });
 
+    it('does not store init-only claims or acknowledge queued tool work when the live session advances', async () => {
+      const session = createMockSession({ lastGeneratorSource: 'ingest' });
+      const context = {
+        project: session.project, promptNumber: 1,
+        pendingAgentId: null, pendingAgentType: null, source: 'init',
+      };
+      const text = '<observation><type>feature</type><title>Unproven deployment</title><narrative>The user asked to deploy.</narrative></observation>';
+      await processAgentResponse(text, session, mockDbManager, mockSessionManager,
+        mockWorker, 100, null, 'SDK', undefined, undefined, context);
+      expect(mockStoreObservations).not.toHaveBeenCalled();
+      expect(mockSessionManager.confirmClaimedMessages).not.toHaveBeenCalled();
+      expect(session.conversationHistory).toEqual([{ role: 'assistant', content: '<observer_ready />' }]);
+    });
+
     it('stores observations against the dispatched prompt context when the live session has already advanced', async () => {
       const session = createMockSession({
         project: 'repo-b/worktree',

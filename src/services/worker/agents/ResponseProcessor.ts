@@ -1,5 +1,6 @@
 
 import { logger } from '../../../utils/logger.js';
+import { OBSERVER_READY_MARKER } from '../../../sdk/prompts.js';
 import { parseAgentXml, type ParsedObservation, type ParsedSummary } from '../../../sdk/parser.js';
 import {
   classifyObserverOutput,
@@ -262,6 +263,7 @@ function mergeFileLists(primary: string[], secondary: string[]): string[] {
 }
 
 export interface ResponseContext {
+  source?: string;
   project: string;
   promptNumber: number;
   pendingAgentId: string | null;
@@ -270,6 +272,7 @@ export interface ResponseContext {
 
 export function snapshotResponseContext(session: ActiveSession): ResponseContext {
   return {
+    source: session.lastGeneratorSource,
     project: session.project,
     promptNumber: session.lastPromptNumber,
     pendingAgentId: session.pendingAgentId ?? null,
@@ -303,6 +306,14 @@ export async function processAgentResponse(
     (isContextOverflowObserverOutput(text) ||
       isQuotaLimitedObserverOutput(text) ||
       isAuthFailureObserverOutput(text));
+
+  // Init describes intent, not a tool outcome. A response to it cannot prove
+  // completed work or acknowledge tool messages queued while it was in flight.
+  // Still route provider refusals through the quota/auth/recycle handling below.
+  if (context.source === 'init' && !isRejectionProse) {
+    session.conversationHistory.push({ role: 'assistant', content: OBSERVER_READY_MARKER });
+    return;
+  }
 
   if (text && !isRejectionProse) {
     session.conversationHistory.push({ role: 'assistant', content: text });

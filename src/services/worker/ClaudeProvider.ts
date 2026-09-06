@@ -566,7 +566,7 @@ export class ClaudeProvider {
     const initPrompt = isInitPrompt
       ? buildInitPrompt(session.project, session.contentSessionId, session.userPrompt, mode, priorContext)
       : buildContinuationPrompt(session.userPrompt, session.lastPromptNumber, session.contentSessionId, mode, priorContext);
-    activeResponseContext.current = snapshotResponseContext(session);
+    activeResponseContext.current = { ...snapshotResponseContext(session), source: 'init' };
 
     session.conversationHistory.push({ role: 'user', content: initPrompt });
 
@@ -630,7 +630,7 @@ export class ClaudeProvider {
           created_at_epoch: Date.now(),
           cwd: message.cwd
         });
-        activeResponseContext.current = snapshotResponseContext(session);
+        activeResponseContext.current = { ...snapshotResponseContext(session), source: 'ingest' };
 
         session.conversationHistory.push({ role: 'user', content: obsPrompt });
 
@@ -654,7 +654,7 @@ export class ClaudeProvider {
           user_prompt: session.userPrompt,
           last_assistant_message: message.last_assistant_message || ''
         }, mode);
-        activeResponseContext.current = snapshotResponseContext(session);
+        activeResponseContext.current = { ...snapshotResponseContext(session), source: 'summarize' };
 
         session.conversationHistory.push({ role: 'user', content: summaryPrompt });
 
