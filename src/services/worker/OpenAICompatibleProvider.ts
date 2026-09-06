@@ -8,7 +8,6 @@ import {
   buildObservationPrompt,
   buildSummaryPrompt,
   buildContinuationPrompt,
-  OBSERVER_READY_MARKER,
 } from '../../sdk/prompts.js';
 import type { ActiveSession, ConversationMessage } from '../worker-types.js';
 import { ModeManager } from '../domain/ModeManager.js';
@@ -21,7 +20,6 @@ import {
   resolveConversationMaxChars,
 } from '../../shared/observer-recycle.js';
 import { recycleObserverConversation, loadSessionStartContext } from './session/recycle-conversation.js';
-import { optimizeObservationFields, buildFieldCompressionPrompt } from './field-optimizer.js';
 
 import {
   processAgentResponse,
@@ -85,21 +83,6 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
   /** Issue the actual HTTP request and normalize its response. */
   protected abstract query(history: ConversationMessage[], config: TConfig): Promise<ProviderQueryResult>;
 
-  /**
-   * One bounded, standalone call that condenses an oversized tool payload.
-   *
-   * Issued off to the side with its own single-message history: adding it to
-   * `session.conversationHistory` would grow the very conversation the recycle
-   * logic exists to bound.
-   */
-  private async compressField(text: string, budgetChars: number, config: TConfig): Promise<string | null> {
-    const result = await this.query(
-      [{ role: 'user', content: buildFieldCompressionPrompt(text, budgetChars) }],
-      config,
-    );
-    return result.content || null;
-  }
-
   /** Estimate token count for a single message body. */
   protected abstract estimateTokens(text: string): number;
 
@@ -146,8 +129,9 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
     try {
       session.lastPromptSentAt = Date.now();
       session.lastGeneratorSource = 'init';
+      const initResponseContext = { ...snapshotResponseContext(session), source: 'init' };
       const initResponse = await this.query(session.conversationHistory, config);
-      await this.handleInitResponse(initResponse, session, model);
+      await this.handleInitResponse(initResponse, session, worker, model, initResponseContext);
     } catch (error: unknown) {
       // Classified errors are logged once, at SessionRoutes' `Observer failed`
       // line; here they're debug-level so one failure isn't five error lines.
@@ -159,6 +143,10 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
         logger.error('SDK', `${this.providerName} init query failed with non-Error`, { sessionId: session.sessionDbId, model }, new Error(String(error)));
       }
       return this.handleSessionError(error, session, worker);
+    }
+
+    if (session.abortController.signal.aborted) {
+      return;
     }
 
     try {
@@ -210,23 +198,20 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
   private async handleInitResponse(
     initResponse: ProviderQueryResult,
     session: ActiveSession,
+    worker: WorkerRef | undefined,
     model: string,
+    responseContext: ReturnType<typeof snapshotResponseContext>,
   ): Promise<void> {
     if (initResponse.content) {
-      // The init turn contains only the user's requested future work. Model
-      // output from this turn is neither tool evidence nor safe conversation
-      // context: persisting or replaying it can turn intent into a fabricated
-      // completed-work observation. Keep a neutral assistant turn for role
-      // alternation and wait for the first real tool outcome.
-      session.conversationHistory.push({ role: 'assistant', content: OBSERVER_READY_MARKER });
       const tokensUsed = initResponse.tokensUsed || 0;
       session.cumulativeInputTokens += Math.floor(tokensUsed * 0.7);
       session.cumulativeOutputTokens += Math.floor(tokensUsed * 0.3);
       session.lastUsage = this.buildLastUsage(initResponse);
-      logger.debug('SDK', `Discarded ${this.providerName} init content until tool evidence arrives`, {
-        sessionId: session.sessionDbId,
-        model: initResponse.servedModel ?? model,
-      });
+      await processAgentResponse(
+        initResponse.content, session, this.dbManager, this.sessionManager,
+        worker, tokensUsed, null, this.providerName, undefined,
+        initResponse.servedModel ?? model, responseContext
+      );
     } else {
       logger.error('SDK', `Empty ${this.providerName} init response - session may lack context`, {
         sessionId: session.sessionDbId, model
@@ -264,20 +249,11 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
       return;
     }
 
-    // An oversized payload is condensed by a bounded model pass before the
-    // prompt is built, so the observation carries a summary of the whole field
-    // rather than a head/tail slice with the middle cut out (#3800).
-    const optimized = await optimizeObservationFields(
-      { toolInput: message.tool_input, toolOutput: message.tool_response },
-      (text, budgetChars) => this.compressField(text, budgetChars, config),
-      { sessionDbId: session.sessionDbId, toolName: message.tool_name },
-    );
-
     const obsPrompt = buildObservationPrompt({
       id: 0,
       tool_name: message.tool_name!,
-      tool_input: JSON.stringify(optimized.toolInput),
-      tool_output: JSON.stringify(optimized.toolOutput),
+      tool_input: JSON.stringify(message.tool_input),
+      tool_output: JSON.stringify(message.tool_response),
       created_at_epoch: originalTimestamp ?? Date.now(),
       cwd: message.cwd
     });

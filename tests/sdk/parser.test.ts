@@ -35,7 +35,7 @@ afterEach(() => {
 
 describe('parseAgentXml — observations', () => {
   it('treats <skip_observation/> as a valid observation no-op', () => {
-    const result = parseAgentXml('<skip_observation reason="agent bookkeeping"/>');
+    const result = parseAgentXml('\n  <skip_observation reason="agent bookkeeping"/>  \n');
 
     expect(result.valid).toBe(true);
     if (result.valid) {
@@ -43,6 +43,46 @@ describe('parseAgentXml — observations', () => {
       expect(result.observations).toEqual([]);
       expect(result.summary).toBeNull();
     }
+  });
+
+  it('treats a fenced standalone skip as a valid observation no-op', () => {
+    const result = parseAgentXml('```xml\n<skip_observation />\n```');
+
+    expect(result.valid).toBe(true);
+    if (result.valid) {
+      expect(result.skipObservation).toBe(true);
+      expect(result.observations).toEqual([]);
+      expect(result.summary).toBeNull();
+    }
+  });
+
+  it('preserves an observation whose narrative mentions the skip token', () => {
+    const xml = `<observation>
+      <type>discovery</type>
+      <title>Explicit skip protocol</title>
+      <narrative>The observer now returns <skip_observation /> for routine tool results.</n+</narrative>
+    </observation>`;
+
+    const result = expectObservation(xml);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].title).toBe('Explicit skip protocol');
+    expect(result[0].narrative).toContain('<skip_observation />');
+  });
+
+  it('preserves useful observations when a skip token is also present', () => {
+    const xml = `<skip_observation />
+    <observation>
+      <type>bugfix</type>
+      <title>Useful result</title>
+      <facts><fact>The parser retained this observation.</fact></facts>
+    </observation>`;
+
+    const result = expectObservation(xml);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].title).toBe('Useful result');
+    expect(result[0].facts).toEqual(['The parser retained this observation.']);
   });
 
   it('returns a populated observation when title is present', () => {

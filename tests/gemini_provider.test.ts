@@ -365,6 +365,9 @@ describe('GeminiProvider', () => {
     session.project = 'repo-b/worktree';
     session.userPrompt = 'prompt 2';
     session.lastPromptNumber = 2;
+    session.lastGeneratorSource = 'ingest';
+    session.pendingAgentId = 'agent-after-init';
+    session.pendingAgentType = 'subagent';
 
     resolveFetch(new Response(JSON.stringify({
       candidates: [{ content: { parts: [{ text: observationXml }] } }],
@@ -375,7 +378,58 @@ describe('GeminiProvider', () => {
 
     expect(mockStoreObservations).not.toHaveBeenCalled();
     expect(session.conversationHistory.some((message: any) => message.content.includes('Late init response'))).toBe(false);
+    expect(session.conversationHistory.some((message: any) => message.role === 'assistant')).toBe(true);
   });
+
+  for (const scenario of [
+    {
+      label: 'quota-limit',
+      content: "You've hit your session limit · resets 5:50pm",
+      abortReason: 'quota:observer_text',
+    },
+    {
+      label: 'authentication-failure',
+      content: 'Failed to authenticate. API Error: 401 · Please run /login',
+      abortReason: 'auth:observer_text',
+    },
+    {
+      label: 'context-overflow',
+      content: 'Prompt is too long',
+      abortReason: 'overflow:recycle',
+    },
+  ]) {
+    it(`preserves queued work and stops after ${scenario.label} prose in the init response`, async () => {
+      const session = makeSession();
+      let queueState = 'claimed';
+      let messageLoopStarted = false;
+
+      (mockSessionManager as any).confirmClaimedMessages = mock(async () => {
+        queueState = 'cleared';
+        return 1;
+      });
+      (mockSessionManager as any).resetProcessingToPending = mock(async () => {
+        queueState = 'pending';
+        return 1;
+      });
+      (mockSessionManager as any).getMessageIterator = async function* () {
+        messageLoopStarted = true;
+        yield* [];
+      };
+      global.fetch = mock(() => Promise.resolve(new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ text: scenario.content }] } }],
+        usageMetadata: { totalTokenCount: 50 },
+      }))));
+
+      await agent.startSession(session);
+
+      expect(queueState).toBe('pending');
+      expect(messageLoopStarted).toBe(false);
+      expect(session.abortReason).toBe(scenario.abortReason);
+      expect(session.abortController.signal.aborted).toBe(true);
+      expect(mockStoreObservations).not.toHaveBeenCalled();
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+  }
 
   it('should throw on rate limit (429) error — no Claude fallback (#2087)', async () => {
     const session = {

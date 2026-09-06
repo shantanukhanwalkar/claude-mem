@@ -45,7 +45,7 @@ export function parseAgentXml(raw: string, correlationId?: string | number): Par
 
   raw = stripCodeFences(raw);
 
-  const observationSkipMatch = /<skip_observation(?:\s+reason="([^"]*)")?\s*\/>/.exec(raw);
+  const observationSkipMatch = /^<skip_observation(?:\s+reason="([^"]*)")?\s*\/>$/.exec(raw.trim());
   if (observationSkipMatch) {
     return {
       valid: true,
