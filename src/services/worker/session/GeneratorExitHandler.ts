@@ -14,8 +14,9 @@ export interface GeneratorExitDependencies {
  *
  * The generator's message iterator only ends on abort (idle / shutdown) or when
  * the SDK stream throws, so most exits mean this session is done. Quota exits
- * are different: claimed work has already been reset to pending, so leave the
- * session and in-RAM buffer alive for a later generator start.
+ * and interrupted stream exits are different: claimed work has already been
+ * reset to pending, so leave the session and in-RAM buffer alive for a later
+ * generator start.
  *
  * For non-quota exits we do NOT respawn on remaining buffered work: the old
  * respawn-on-pending loop, driven by the durable pending_messages queue, was the
@@ -41,12 +42,17 @@ export async function handleGeneratorExit(
   session.generatorPromise = null;
   session.currentProvider = null;
 
-  // 'overflow' joins quota/auth as a pause-and-preserve exit: ResponseProcessor
-  // has already reset the claimed batch to pending and (on a recycle) cleared
-  // the conversation, so the session must survive for the next ingest to open a
-  // fresh generator and drain it. Finalizing here would drop that work (#3800).
+  // 'overflow' and 'stream' join quota/auth as pause-and-preserve exits. The
+  // claimed batch is already pending again, so the session must survive for a
+  // later ingest to open a fresh generator and drain it. Only overflow:recycle
+  // is restarted automatically by SessionRoutes; stream failures stay paused.
   const abortCategory = (reason ?? '').split(':')[0];
-  if (abortCategory === 'quota' || abortCategory === 'auth' || abortCategory === 'overflow') {
+  if (
+    abortCategory === 'quota' ||
+    abortCategory === 'auth' ||
+    abortCategory === 'overflow' ||
+    abortCategory === 'stream'
+  ) {
     logger.warn('SESSION', `Generator paused for ${abortCategory}; preserving buffered work`, {
       sessionId: sessionDbId,
       pendingCount: sessionManager.getMessageBuffer().getPendingCount(sessionDbId),

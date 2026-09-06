@@ -176,6 +176,8 @@ afterAll(() => {
 });
 
 const { ClaudeProvider } = await import('../../src/services/worker/ClaudeProvider.js');
+const { SessionManager } = await import('../../src/services/worker/SessionManager.js');
+const { handleGeneratorExit } = await import('../../src/services/worker/session/GeneratorExitHandler.js');
 
 function makeSession(): ActiveSession {
   return {
@@ -231,6 +233,40 @@ function makeHarness(messages: PendingMessageWithId[]) {
   const dbManager = { getSessionStore: () => sessionStore };
   const provider = new ClaudeProvider(dbManager as any, sessionManager as any);
   return { session, provider, getResetCalls: () => resetCalls };
+}
+
+async function makeRealBufferHarness(sessionDbId: number, queueTool = true) {
+  let memorySessionId: string | null = null;
+  const sessionStore = {
+    getPromptNumberFromUserPrompts: () => 1,
+    updateMemorySessionId: (_id: number, value: string | null) => { memorySessionId = value; },
+    ensureMemorySessionIdRegistered: (_id: number, value: string) => { memorySessionId = value; },
+    getSessionById: () => ({ memory_session_id: memorySessionId }),
+  };
+  const dbManager = {
+    getSessionById: () => ({
+      content_session_id: `content-${sessionDbId}`,
+      memory_session_id: memorySessionId,
+      project: 'project-a',
+      platform_source: 'claude',
+      user_prompt: 'Remember only completed tool work.',
+    }),
+    getSessionStore: () => sessionStore,
+  };
+  const sessionManager = new SessionManager(dbManager as any);
+  const session = sessionManager.initializeSession(sessionDbId, 'Remember only completed tool work.', 1);
+  session.currentProvider = 'claude';
+  if (queueTool) {
+    await sessionManager.queueObservation(sessionDbId, {
+      tool_name: 'Read',
+      tool_input: { file_path: 'retained.ts' },
+      tool_response: 'retained payload',
+      prompt_number: 2,
+      toolUseId: `tool-${sessionDbId}`,
+    });
+  }
+  const provider = new ClaudeProvider(dbManager as any, sessionManager);
+  return { session, sessionManager, provider };
 }
 
 function assistant(text: string) {
@@ -374,6 +410,7 @@ describe('ClaudeProvider streaming turn ordering', () => {
     await activeQuery.waitForPrompts(1);
     activeQuery.output.push(success(''));
     await activeQuery.waitForPrompts(2);
+    session.abortReason = 'shutdown';
     session.abortController.abort();
 
     await within(activeQuery.inputDone);
@@ -382,6 +419,7 @@ describe('ClaudeProvider streaming turn ordering', () => {
     expect(activeQuery.prompts).toHaveLength(2);
     expect(getResetCalls()).toBe(1);
     expect(processed.map(item => item.source)).toEqual(['init']);
+    expect(session.abortReason).toBe('shutdown');
   });
 
   it('unblocks the eager input pump when the SDK output ends before a result', async () => {
@@ -401,5 +439,159 @@ describe('ClaudeProvider streaming turn ordering', () => {
     expect(activeQuery.prompts).toHaveLength(2);
     expect(getResetCalls()).toBe(1);
     expect(processed.map(item => item.source)).toEqual(['init']);
+  });
+
+  it('preserves the real buffered tool payload through a failed result and generator exit', async () => {
+    processed.length = 0;
+    activeQuery = undefined;
+    const { session, sessionManager, provider } = await makeRealBufferHarness(81);
+    const run = provider.startSession(session);
+
+    while (!activeQuery) await settle();
+    await activeQuery.waitForPrompts(1);
+    activeQuery.output.push(success(''));
+    await activeQuery.waitForPrompts(2);
+    activeQuery.output.push(failure('upstream failed'));
+    await within(run);
+
+    expect(session.abortReason).toBe('stream:failed_result');
+    expect(session.abortController.signal.aborted).toBe(true);
+    expect(sessionManager.getMessageBuffer().getPendingCount(81)).toBe(1);
+    expect(sessionManager.getClaimedMessages(81)).toEqual([]);
+
+    let finalized = 0;
+    await handleGeneratorExit(session, session.abortReason, {
+      sessionManager,
+      completionHandler: { finalizeSession: async () => { finalized += 1; } } as any,
+    });
+
+    expect(finalized).toBe(0);
+    expect(sessionManager.getSession(81)).toBe(session);
+    expect(sessionManager.getMessageBuffer().getPendingCount(81)).toBe(1);
+    expect(session.generatorPromise).toBeNull();
+    expect(session.currentProvider).toBeNull();
+  });
+
+  it('preserves the real buffered tool payload through unexpected EOF and generator exit', async () => {
+    processed.length = 0;
+    activeQuery = undefined;
+    const { session, sessionManager, provider } = await makeRealBufferHarness(82);
+    const run = provider.startSession(session);
+
+    while (!activeQuery) await settle();
+    await activeQuery.waitForPrompts(1);
+    activeQuery.output.push(success(''));
+    await activeQuery.waitForPrompts(2);
+    activeQuery.output.close();
+    await within(run);
+    await within(activeQuery.inputDone);
+
+    expect(session.abortReason).toBe('stream:unexpected_eof');
+    expect(session.abortController.signal.aborted).toBe(true);
+    expect(sessionManager.getMessageBuffer().getPendingCount(82)).toBe(1);
+    expect(sessionManager.getClaimedMessages(82)).toEqual([]);
+
+    let finalized = 0;
+    await handleGeneratorExit(session, session.abortReason, {
+      sessionManager,
+      completionHandler: { finalizeSession: async () => { finalized += 1; } } as any,
+    });
+
+    expect(finalized).toBe(0);
+    expect(sessionManager.getSession(82)).toBe(session);
+    expect(sessionManager.getMessageBuffer().getPendingCount(82)).toBe(1);
+    expect(session.generatorPromise).toBeNull();
+    expect(session.currentProvider).toBeNull();
+  });
+
+  it('preserves unclaimed real buffered work when init receives a failed result', async () => {
+    processed.length = 0;
+    activeQuery = undefined;
+    const { session, sessionManager, provider } = await makeRealBufferHarness(85);
+    const run = provider.startSession(session);
+
+    while (!activeQuery) await settle();
+    await activeQuery.waitForPrompts(1);
+    activeQuery.output.push(failure('init failed'));
+    await within(run);
+    await within(activeQuery.inputDone);
+
+    expect(activeQuery.prompts).toHaveLength(1);
+    expect(session.abortReason).toBe('stream:failed_result');
+    expect(session.abortController.signal.aborted).toBe(true);
+    expect(sessionManager.getMessageBuffer().getPendingCount(85)).toBe(1);
+
+    let finalized = 0;
+    await handleGeneratorExit(session, session.abortReason, {
+      sessionManager,
+      completionHandler: { finalizeSession: async () => { finalized += 1; } } as any,
+    });
+    expect(finalized).toBe(0);
+    expect(sessionManager.getSession(85)).toBe(session);
+    expect(sessionManager.getMessageBuffer().getPendingCount(85)).toBe(1);
+  });
+
+  it('preserves unclaimed real buffered work when the SDK ends during init', async () => {
+    processed.length = 0;
+    activeQuery = undefined;
+    const { session, sessionManager, provider } = await makeRealBufferHarness(86);
+    const run = provider.startSession(session);
+
+    while (!activeQuery) await settle();
+    await activeQuery.waitForPrompts(1);
+    activeQuery.output.close();
+    await within(run);
+    await within(activeQuery.inputDone);
+
+    expect(activeQuery.prompts).toHaveLength(1);
+    expect(session.abortReason).toBe('stream:unexpected_eof');
+    expect(session.abortController.signal.aborted).toBe(true);
+    expect(sessionManager.getMessageBuffer().getPendingCount(86)).toBe(1);
+
+    let finalized = 0;
+    await handleGeneratorExit(session, session.abortReason, {
+      sessionManager,
+      completionHandler: { finalizeSession: async () => { finalized += 1; } } as any,
+    });
+    expect(finalized).toBe(0);
+    expect(sessionManager.getSession(86)).toBe(session);
+    expect(sessionManager.getMessageBuffer().getPendingCount(86)).toBe(1);
+  });
+
+  it('aborts a real message iterator waiting between turns when SDK output ends', async () => {
+    processed.length = 0;
+    activeQuery = undefined;
+    const { session, sessionManager, provider } = await makeRealBufferHarness(87, false);
+    const run = provider.startSession(session);
+
+    while (!activeQuery) await settle();
+    await activeQuery.waitForPrompts(1);
+    activeQuery.output.push(success(''));
+    await settle();
+    activeQuery.output.close();
+
+    await within(run);
+    await within(activeQuery.inputDone);
+    expect(session.abortReason).toBe('stream:unexpected_eof');
+    expect(session.abortController.signal.aborted).toBe(true);
+    expect(sessionManager.getSession(87)).toBe(session);
+  });
+
+  it('keeps intentional idle and shutdown exits finalizing normally', async () => {
+    for (const [sessionDbId, reason] of [[83, 'idle'], [84, 'shutdown']] as const) {
+      const { session, sessionManager } = await makeRealBufferHarness(sessionDbId);
+      session.abortReason = reason;
+      session.abortController.abort();
+      let finalized = 0;
+
+      await handleGeneratorExit(session, reason, {
+        sessionManager,
+        completionHandler: { finalizeSession: async () => { finalized += 1; } } as any,
+      });
+
+      expect(finalized).toBe(1);
+      expect(sessionManager.getSession(sessionDbId)).toBeUndefined();
+      expect(sessionManager.getMessageBuffer().getPendingCount(sessionDbId)).toBe(0);
+    }
   });
 });

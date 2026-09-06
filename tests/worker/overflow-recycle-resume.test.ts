@@ -143,6 +143,26 @@ describe('observer resumes itself after recycling its conversation (#3800)', () 
     expect(starts).toBe(1);
   });
 
+  it('preserves a stream-failure pause without automatically retrying it', async () => {
+    const session = makeSession();
+    let starts = 0;
+
+    const { routes, stats } = buildRoutes(session, async () => {
+      starts += 1;
+      session.abortReason = 'stream:failed_result';
+      session.abortController.abort();
+    });
+
+    await routes.ensureGeneratorRunning(session.sessionDbId, 'observation');
+    await session.generatorPromise;
+    await nextTick();
+
+    expect(starts).toBe(1);
+    expect(stats().finalizeCalls).toBe(0);
+    expect(stats().removed).toBe(0);
+    expect(stats().active).toBe(session);
+  });
+
   it('preserves the session across a recycle instead of finalizing it', async () => {
     const session = makeSession();
     let starts = 0;

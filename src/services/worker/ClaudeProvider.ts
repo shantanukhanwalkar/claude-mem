@@ -275,6 +275,7 @@ export class ClaudeProvider {
 
     // Find and validate Claude executable (shared utility, closes #2222)
     let claudePath: string;
+    let reachedSdkEof = false;
     try {
       claudePath = findClaudeExecutable('SDK');
       clearDependencyStatus('claude_cli');
@@ -593,12 +594,17 @@ export class ClaudeProvider {
           }
 
           if (!completedSuccessfully || session.abortController.signal.aborted) {
+            if (!completedSuccessfully && !session.abortReason) {
+              session.abortReason = 'stream:failed_result';
+              session.abortController.abort();
+            }
             turnGate.stop();
             break;
           }
           turnGate.complete();
         }
       }
+      reachedSdkEof = true;
     } finally {
       // query() pumps the input iterable independently of its output iterator.
       // Release a generator suspended behind an unfinished turn on every exit.
@@ -609,6 +615,13 @@ export class ClaudeProvider {
         session.claimedMessageIds.length > 0
       ) {
         await this.sessionManager.resetProcessingToPending(session.sessionDbId);
+      }
+      if (
+        reachedSdkEof &&
+        !session.abortReason
+      ) {
+        session.abortReason = 'stream:unexpected_eof';
+        session.abortController.abort();
       }
       // Safety net for paths where the SDK never invoked the spawn factory;
       // a leaked reservation would occupy an agent slot until worker restart.
