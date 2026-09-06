@@ -12,9 +12,11 @@ Constraints: retain Claude CLI/OAuth and Sonnet 4.5; preserve database and queue
 - [x] Fix quota-store freshness with the captured snapshot regression, valid unified windows, seconds/ms expiry, malformed data, and genuine rejection protection.
 - [x] Pin and audit installation: one canonical maintained build, coherent manifest/runtime version, matching Claude/Codex worker hashes, upstream auto-update disabled, daily audit instead of unattended upstream rebases/deployment. Retain rollback snapshot and document explicit update procedure.
 - [x] Run focused tests, type checks, build, independent review; resolve findings. Commit source and built artifacts in the durable fork.
-- [ ] Deploy and restart corrected worker preserving pending work/cooldowns. Verify same build through both integrations, successful real observation capture and retrieval, bounded inference activity, and stability across hook events.
-- [ ] Update Jira and provider/runbook records with exact verification and any remaining limits.
+- [x] Deploy and restart corrected worker preserving pending work/cooldowns. Verify same build through both integrations, successful real observation capture and retrieval, bounded inference activity, and stability across hook events.
+- [x] Update Jira and provider/runbook records with exact verification and any remaining limits.
 
 Progress evidence lives in /home/sk/tmp/claude-mem-*-report.md and /home/sk/tmp/claude-mem-*-tests.log. Independent quota and payload implementers own disjoint files. Root owns integration, grounding, Jira, deployment and live validation. No approval pause is required: the user explicitly requested fixing the installed service.
 
 Verification before deployment: all276 test files passed in isolated Bun processes (3009 pass,27skip); final stream followup has559worker tests passing and root/viewer typechecks plus build pass. Independent review has no unresolved important findings. Existing all-in-one runner leaks mocks between files; affected files pass isolated. Active upstream RAM queue recovery is being archived/mapped before cutover; SQLite pending_messages is legacy and is not the active queue.
+
+Completion: maintained local.2 deployed; final668-test suite, live capture/retrieval, provenance audit, repaired vector index and controlled SDK rollover verified. Runtime evidence and recovery limitations are retained locally in /home/sk/.claude-mem/STABILITY-VERIFICATION.md. Recovered work continues asynchronously.
