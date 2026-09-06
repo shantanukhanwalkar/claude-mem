@@ -1,0 +1,16 @@
+[Unit]
+Description=Audit the pinned personal claude-mem installation
+
+[Service]
+Type=oneshot
+Environment=PATH=/home/sk/.nvm/versions/node/v24.13.0/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/sk/.nvm/versions/node/v24.13.0/bin/node /home/sk/development/tools/claude-mem/scripts/audit-local-install.cjs
+TimeoutStartSec=60
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictSUIDSGID=true
+LockPersonality=true
+

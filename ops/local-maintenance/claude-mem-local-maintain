@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:---check}" != "--check" || "$#" -gt 1 ]]; then
+  echo "Automatic claude-mem updates are disabled. Use --check to audit the pinned build; follow docs/local-stable-runbook.md for a reviewed update." >&2
+  exit 64
+fi
+
+exec /home/sk/.nvm/versions/node/v24.13.0/bin/node \
+  /home/sk/development/tools/claude-mem/scripts/audit-local-install.cjs
