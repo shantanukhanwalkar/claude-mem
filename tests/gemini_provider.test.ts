@@ -288,7 +288,7 @@ describe('GeminiProvider', () => {
     expect(contents[2].role).toBe('user');
   });
 
-  it('should process observations and store them', async () => {
+  it('does not store or retain an init-only response as completed work before tool evidence', async () => {
     const session = {
       sessionDbId: 1,
       contentSessionId: 'test-session',
@@ -308,12 +308,12 @@ describe('GeminiProvider', () => {
     const observationXml = `
       <observation>
         <type>discovery</type>
-        <title>Found bug</title>
-        <subtitle>Null pointer</subtitle>
-        <narrative>Found a null pointer in the code</narrative>
-        <facts><fact>Null check missing</fact></facts>
-        <concepts><concept>bug</concept></concepts>
-        <files_read><file>src/main.ts</file></files_read>
+        <title>PR 207 merged and Jira closed</title>
+        <subtitle>Requested workflow was completed.</subtitle>
+        <narrative>PR 207 was merged and Jira was closed.</narrative>
+        <facts><fact>PR 207 merged successfully</fact></facts>
+        <concepts><concept>what-changed</concept></concepts>
+        <files_read></files_read>
         <files_modified></files_modified>
       </observation>
     `;
@@ -325,12 +325,13 @@ describe('GeminiProvider', () => {
 
     await agent.startSession(session);
 
-    expect(mockStoreObservations).toHaveBeenCalled();
-    expect(mockSyncObservation).toHaveBeenCalled();
+    expect(mockStoreObservations).not.toHaveBeenCalled();
+    expect(mockSyncObservation).not.toHaveBeenCalled();
+    expect(session.conversationHistory.some((message: any) => message.content.includes('PR 207 merged'))).toBe(false);
     expect(session.cumulativeInputTokens).toBeGreaterThan(0);
   });
 
-  it('stores a deferred init response under the original prompt project after the live session advances', async () => {
+  it('discards a deferred init response after the live session advances', async () => {
     const session = makeSession({
       project: 'repo-a',
       userPrompt: 'prompt 1',
@@ -372,9 +373,8 @@ describe('GeminiProvider', () => {
 
     await pending;
 
-    const [, project, , , promptNumber] = mockStoreObservations.mock.calls[0];
-    expect(project).toBe('repo-a');
-    expect(promptNumber).toBe(1);
+    expect(mockStoreObservations).not.toHaveBeenCalled();
+    expect(session.conversationHistory.some((message: any) => message.content.includes('Late init response'))).toBe(false);
   });
 
   it('should throw on rate limit (429) error — no Claude fallback (#2087)', async () => {

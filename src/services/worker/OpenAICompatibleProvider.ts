@@ -3,7 +3,13 @@ import { SessionManager } from './SessionManager.js';
 import { logger } from '../../utils/logger.js';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
 import { USER_SETTINGS_PATH } from '../../shared/paths.js';
-import { buildInitPrompt, buildObservationPrompt, buildSummaryPrompt, buildContinuationPrompt } from '../../sdk/prompts.js';
+import {
+  buildInitPrompt,
+  buildObservationPrompt,
+  buildSummaryPrompt,
+  buildContinuationPrompt,
+  OBSERVER_READY_MARKER,
+} from '../../sdk/prompts.js';
 import type { ActiveSession, ConversationMessage } from '../worker-types.js';
 import { ModeManager } from '../domain/ModeManager.js';
 import type { ModeConfig } from '../domain/types.js';
@@ -135,15 +141,13 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
     const initPrompt = session.lastPromptNumber === 1
       ? buildInitPrompt(session.project, session.contentSessionId, session.userPrompt, mode, priorContext)
       : buildContinuationPrompt(session.userPrompt, session.lastPromptNumber, session.contentSessionId, mode, priorContext);
-    const initContext = snapshotResponseContext(session);
-
     session.conversationHistory.push({ role: 'user', content: initPrompt });
 
     try {
       session.lastPromptSentAt = Date.now();
       session.lastGeneratorSource = 'init';
       const initResponse = await this.query(session.conversationHistory, config);
-      await this.handleInitResponse(initResponse, session, worker, model, initContext);
+      await this.handleInitResponse(initResponse, session, model);
     } catch (error: unknown) {
       // Classified errors are logged once, at SessionRoutes' `Observer failed`
       // line; here they're debug-level so one failure isn't five error lines.
@@ -206,20 +210,23 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
   private async handleInitResponse(
     initResponse: ProviderQueryResult,
     session: ActiveSession,
-    worker: WorkerRef | undefined,
     model: string,
-    responseContext: ReturnType<typeof snapshotResponseContext>
   ): Promise<void> {
     if (initResponse.content) {
-      // Appended once, by processAgentResponse below — see processObservationMessage.
+      // The init turn contains only the user's requested future work. Model
+      // output from this turn is neither tool evidence nor safe conversation
+      // context: persisting or replaying it can turn intent into a fabricated
+      // completed-work observation. Keep a neutral assistant turn for role
+      // alternation and wait for the first real tool outcome.
+      session.conversationHistory.push({ role: 'assistant', content: OBSERVER_READY_MARKER });
       const tokensUsed = initResponse.tokensUsed || 0;
       session.cumulativeInputTokens += Math.floor(tokensUsed * 0.7);
       session.cumulativeOutputTokens += Math.floor(tokensUsed * 0.3);
       session.lastUsage = this.buildLastUsage(initResponse);
-      await processAgentResponse(
-        initResponse.content, session, this.dbManager, this.sessionManager,
-        worker, tokensUsed, null, this.providerName, undefined, initResponse.servedModel ?? model, responseContext
-      );
+      logger.debug('SDK', `Discarded ${this.providerName} init content until tool evidence arrives`, {
+        sessionId: session.sessionDbId,
+        model: initResponse.servedModel ?? model,
+      });
     } else {
       logger.error('SDK', `Empty ${this.providerName} init response - session may lack context`, {
         sessionId: session.sessionDbId, model

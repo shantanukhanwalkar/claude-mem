@@ -4,6 +4,24 @@ import type { ModeConfig } from '../services/domain/types.js';
 
 export const SUMMARY_MODE_MARKER = 'MODE SWITCH: PROGRESS SUMMARY';
 
+export const OBSERVER_READY_MARKER = '<observer_ready />';
+
+const USER_REQUEST_EVIDENCE_BOUNDARY = `USER REQUESTS ARE INTENT, NOT EVIDENCE
+--------------------------------------
+The <user_request> describes desired future work. It is context only, never proof that an action happened.
+Never claim requested work started, succeeded, changed state, or completed unless a later tool outcome explicitly proves it.
+Do not emit an observation from the user request alone. Wait for tool-use evidence.`;
+
+const TOOL_EVIDENCE_BOUNDARY = `PARAMETERS ARE INTENT; OUTCOME IS EVIDENCE
+------------------------------------------
+- Parameters describe an attempted operation. Never claim success from parameters alone.
+- Claim a change, fix, deployment, or completion only when the outcome explicitly proves it.
+- A failed, timed-out, empty, or read-only outcome does not prove the requested state change.
+- Skip agent bookkeeping such as skill reads, collaboration waits/messages/follow-ups, plan-status updates, and orchestration-only events unless the outcome contains a durable project finding.
+- Skip a finding already present in the conversation history unless the outcome materially changes it.
+- Use feature only when the outcome proves a new product or system capability was implemented.
+- Pull request creation, branch pushes, Jira transitions, documentation, and configuration are change events, not features.`;
+
 export interface Observation {
   id: number;
   tool_name: string;
@@ -75,6 +93,8 @@ ${wrapPriorContext(priorContext)}
   <user_request>${userPrompt}</user_request>
   <requested_at>${new Date().toISOString().split('T')[0]}</requested_at>
 </observed_from_primary_session>
+
+${USER_REQUEST_EVIDENCE_BOUNDARY}
 
 ${mode.prompts.observer_role}
 
@@ -182,9 +202,11 @@ export function buildObservationPrompt(obs: Observation): string {
   <outcome>${truncateObservationField(toolOutput)}</outcome>
 </observed_from_primary_session>
 
+${TOOL_EVIDENCE_BOUNDARY}
+
 If a <parameters> or <outcome> block above contains an "<elided chars=... />" marker, that field was truncated to fit the observer's context window. Describe only what you can see in the kept portion and do not infer details about the elided range.
 
-Return either one or more <observation>...</observation> blocks, or <skip_summary reason="noise" /> if this tool use should be skipped.
+Return either one or more <observation>...</observation> blocks, or exactly <skip_observation /> if this tool use should be skipped.
 Concrete debugging findings from logs, queue state, database rows, session routing, or code-path inspection count as durable discoveries and should be recorded.
 Never reply with prose such as "Skipping", "No substantive tool executions", or any explanation outside XML. Non-XML text is discarded.`;
 }
@@ -237,6 +259,8 @@ ${wrapPriorContext(priorContext)}
   <user_request>${userPrompt}</user_request>
   <requested_at>${new Date().toISOString().split('T')[0]}</requested_at>
 </observed_from_primary_session>
+
+${USER_REQUEST_EVIDENCE_BOUNDARY}
 
 ${mode.prompts.system_identity}
 
