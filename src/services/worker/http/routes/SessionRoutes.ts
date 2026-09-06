@@ -329,6 +329,16 @@ export class SessionRoutes extends BaseRouteHandler {
             ? { message: error.message, kind: error.kind, code: error.code, action: error.action, url: error.url, requestId: error.requestId }
             : errorMsg);
         }
+        // An unclassified exception before a provider enters its own stream
+        // guard is still a failed generator, not a completed session. Mark it
+        // as a paused stream exit only after recording the failure above, so
+        // finalization preserves the in-memory batch for the next ingest and
+        // does not auto-respawn it. Classified quota/auth/setup paths and
+        // intentional abort reasons keep their existing handling.
+        if (!isClassified(error) && !session.abortReason) {
+          session.abortReason = 'stream:startup_error';
+          myController.abort();
+        }
         telemetryBuffer.record('session_compressed', session.sessionDbId, {
           outcome: 'error',
           provider,

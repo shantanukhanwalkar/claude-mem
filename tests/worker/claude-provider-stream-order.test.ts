@@ -199,6 +199,7 @@ afterAll(() => {
 const { ClaudeProvider } = await import('../../src/services/worker/ClaudeProvider.js');
 const { SessionManager } = await import('../../src/services/worker/SessionManager.js');
 const { handleGeneratorExit } = await import('../../src/services/worker/session/GeneratorExitHandler.js');
+const { SessionStore } = await import('../../src/services/sqlite/SessionStore.js');
 
 function makeSession(): ActiveSession {
   return {
@@ -339,6 +340,82 @@ async function within<T>(promise: Promise<T>, timeoutMs = 500): Promise<T> {
 }
 
 describe('ClaudeProvider streaming turn ordering', () => {
+  it('starts a recycled generation without nulling durable observation and summary foreign keys', async () => {
+    processed.length = 0;
+    activeQuery = undefined;
+    const store = new SessionStore(':memory:');
+    const oldMemorySessionId = 'memory-before-recycle';
+    const newMemorySessionId = 'memory-after-recycle';
+    const sessionDbId = store.createSDKSession('content-recycle', 'project-a', 'prompt');
+    store.updateMemorySessionId(sessionDbId, oldMemorySessionId);
+    const stored = store.storeObservations(
+      oldMemorySessionId,
+      'project-a',
+      [{
+        type: 'discovery',
+        title: 'Durable observation',
+        subtitle: null,
+        facts: ['Must survive recycle'],
+        narrative: 'The prior observer turn completed.',
+        concepts: [],
+        files_read: [],
+        files_modified: [],
+      }],
+      {
+        request: 'Preserve durable memory',
+        investigated: 'The recycle path',
+        learned: 'Foreign keys must stay non-null',
+        completed: 'Stored existing memory',
+        next_steps: 'Start a fresh SDK generation',
+        notes: null,
+      },
+    );
+    const session = makeSession();
+    session.sessionDbId = sessionDbId;
+    session.contentSessionId = 'content-recycle';
+    session.memorySessionId = oldMemorySessionId;
+    session.forceInit = true;
+    const sessionManager = {
+      getMessageIterator: async function* () { yield* []; },
+      resetProcessingToPending: async () => 0,
+    };
+    const provider = new ClaudeProvider(
+      { getSessionStore: () => store } as any,
+      sessionManager as any,
+    );
+    let startupError: unknown;
+    const run = provider.startSession(session).catch(error => {
+      startupError = error;
+    });
+
+    try {
+      for (let attempts = 0; attempts < 10 && !activeQuery && !startupError; attempts++) {
+        await settle();
+      }
+
+      expect(startupError).toBeUndefined();
+      expect(activeQuery).toBeDefined();
+      expect(session.memorySessionId).toBeNull();
+      expect(store.getSessionById(sessionDbId)?.memory_session_id).toBe(oldMemorySessionId);
+      expect(store.getObservationById(stored.observationIds[0])?.memory_session_id).toBe(oldMemorySessionId);
+      expect(store.getSummaryForSession(oldMemorySessionId)?.request).toBe('Preserve durable memory');
+
+      activeQuery!.output.push({ ...success(''), session_id: newMemorySessionId });
+      activeQuery!.output.close();
+      await within(run);
+      await within(activeQuery!.inputDone);
+
+      expect(session.memorySessionId).toBe(newMemorySessionId);
+      expect(store.getSessionById(sessionDbId)?.memory_session_id).toBe(newMemorySessionId);
+      expect(store.getObservationById(stored.observationIds[0])?.memory_session_id).toBe(newMemorySessionId);
+      expect(store.getSummaryForSession(newMemorySessionId)?.request).toBe('Preserve durable memory');
+    } finally {
+      activeQuery?.output.close();
+      await within(run);
+      store.close();
+    }
+  });
+
   it('does not claim or acknowledge later work before each successful result', async () => {
     processed.length = 0;
     activeQuery = undefined;

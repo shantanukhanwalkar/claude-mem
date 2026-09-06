@@ -301,8 +301,10 @@ export class ClaudeProvider {
     if (session.memorySessionId) {
       // Observer spawns intentionally opt out of Claude transcript persistence.
       // A carried session_id from an earlier no-persist spawn is therefore not
-      // safe to feed back into `resume` on a later fresh process.
-      this.dbManager.getSessionStore().updateMemorySessionId(session.sessionDbId, null);
+      // safe to feed back into `resume` on a later fresh process. Clear only
+      // the process-local value: the durable id is the non-null foreign key for
+      // existing observations and summaries. Capturing the replacement id
+      // updates that key safely through ensureMemorySessionIdRegistered.
       session.memorySessionId = null;
     }
 

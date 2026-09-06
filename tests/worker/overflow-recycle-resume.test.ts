@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, spyOn } from 'bun:test';
 import type { ActiveSession } from '../../src/services/worker-types.js';
+import { SessionManager } from '../../src/services/worker/SessionManager.js';
 import { resetQuotaCooldownsForTesting } from '../../src/shared/quota-cooldown.js';
 import { resetDependencyStatusesForTesting } from '../../src/shared/dependency-health.js';
 import * as observerHealth from '../../src/shared/observer-health.js';
@@ -62,6 +63,43 @@ function buildRoutes(session: ActiveSession, startSession: () => Promise<void>) 
   );
 
   return { routes, stats: () => ({ finalizeCalls, removed, active }) };
+}
+
+async function buildRoutesWithRealBuffer(sessionDbId: number, startSession: () => Promise<void>) {
+  const dbManager = {
+    getSessionById: () => ({
+      content_session_id: `content-${sessionDbId}`,
+      memory_session_id: null,
+      project: 'project',
+      platform_source: 'claude',
+      user_prompt: 'prompt',
+      observed_model: null,
+      observed_billing: null,
+    }),
+    getSessionStore: () => ({ getPromptNumberFromUserPrompts: () => 1 }),
+  };
+  const sessionManager = new SessionManager(dbManager as any);
+  const session = sessionManager.initializeSession(sessionDbId, 'prompt', 1);
+  await sessionManager.queueObservation(sessionDbId, {
+    tool_name: 'Read',
+    tool_input: { file_path: 'queued.ts' },
+    tool_response: 'queued work',
+    prompt_number: 2,
+    toolUseId: `tool-${sessionDbId}`,
+  });
+  let finalizeCalls = 0;
+  const routes = new SessionRoutes(
+    sessionManager,
+    dbManager as any,
+    { startSession } as any,
+    { startSession: async () => {} } as any,
+    { startSession: async () => {} } as any,
+    {} as any,
+    {} as any,
+    { finalizeSession: async () => { finalizeCalls += 1; } } as any,
+  );
+
+  return { routes, session, sessionManager, finalizeCalls: () => finalizeCalls };
 }
 
 describe('observer resumes itself after recycling its conversation (#3800)', () => {
@@ -162,6 +200,29 @@ describe('observer resumes itself after recycling its conversation (#3800)', () 
     expect(stats().finalizeCalls).toBe(0);
     expect(stats().removed).toBe(0);
     expect(stats().active).toBe(session);
+  });
+
+  it('preserves real buffered work without auto-retrying after a generic startup failure', async () => {
+    let starts = 0;
+    const recordFailure = spyOn(observerHealth, 'recordObserverFailure').mockImplementation(() => {});
+    const { routes, session, sessionManager, finalizeCalls } = await buildRoutesWithRealBuffer(78, async () => {
+      starts += 1;
+      throw new Error('startup exploded');
+    });
+
+    try {
+      await routes.ensureGeneratorRunning(session.sessionDbId, 'observation');
+      await session.generatorPromise;
+      await nextTick();
+
+      expect(recordFailure).toHaveBeenCalledWith('claude', 'startup exploded');
+      expect(starts).toBe(1);
+      expect(finalizeCalls()).toBe(0);
+      expect(sessionManager.getSession(session.sessionDbId)).toBe(session);
+      expect(sessionManager.getMessageBuffer().getPendingCount(session.sessionDbId)).toBe(1);
+    } finally {
+      recordFailure.mockRestore();
+    }
   });
 
   it('reports a thrown stream interruption even though its controller is aborted', async () => {
