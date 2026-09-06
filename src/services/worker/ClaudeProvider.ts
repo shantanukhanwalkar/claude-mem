@@ -3,6 +3,11 @@ import { DatabaseManager } from './DatabaseManager.js';
 import { SessionManager } from './SessionManager.js';
 import { logger } from '../../utils/logger.js';
 import { buildInitPrompt, buildObservationPrompt, buildSummaryPrompt, buildContinuationPrompt } from '../../sdk/prompts.js';
+import {
+  isAuthFailureObserverOutput,
+  isContextOverflowObserverOutput,
+  isQuotaLimitedObserverOutput,
+} from '../../sdk/output-classifier.js';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
 import { USER_SETTINGS_PATH, OBSERVER_SESSIONS_DIR, ensureDir, paths } from '../../shared/paths.js';
 import { buildIsolatedEnvWithFreshOAuth, getAuthMethodDescription } from '../../shared/EnvManager.js';
@@ -35,7 +40,6 @@ import {
   resolveConversationMaxChars,
 } from '../../shared/observer-recycle.js';
 import { recycleObserverConversation, loadSessionStartContext } from './session/recycle-conversation.js';
-import { optimizeObservationFields, buildFieldCompressionPrompt, type FieldCompressor } from './field-optimizer.js';
 import { telemetryBuffer } from '../telemetry/buffer.js';
 import { captureEvent } from '../telemetry/telemetry.js';
 import { clearDependencyStatus, recordClaudeCliSetupRequired } from '../../shared/dependency-health.js';
@@ -172,6 +176,83 @@ export function classifyClaudeError(err: unknown): ClassifiedProviderError {
   return new ClassifiedProviderError(message, { kind: 'transient', cause: err });
 }
 
+interface ClaudeTurn {
+  responseContext: ReturnType<typeof snapshotResponseContext>;
+  assistantText: string[];
+  discoveryTokens: number;
+  originalTimestamp: number | null;
+  projectRoot?: string;
+}
+
+interface TurnTicket<T> {
+  value: T;
+  completion: Promise<boolean>;
+}
+
+/** One in-flight prompt at a time, even when the SDK eagerly drains input. */
+class TurnGate<T> {
+  private active: (TurnTicket<T> & { resolve: (completed: boolean) => void }) | null = null;
+  private interrupted: T | undefined;
+  private stopped = false;
+
+  begin(value: T): TurnTicket<T> | null {
+    if (this.stopped) return null;
+    if (this.active) throw new Error('Claude turn gate already has an active prompt');
+
+    let resolve!: (completed: boolean) => void;
+    const completion = new Promise<boolean>(done => { resolve = done; });
+    this.active = { value, completion, resolve };
+    return this.active;
+  }
+
+  get current(): T | undefined {
+    return this.active?.value;
+  }
+
+  get unfinished(): T | undefined {
+    return this.active?.value ?? this.interrupted;
+  }
+
+  async wait(ticket: TurnTicket<T>, signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted) {
+      this.stop();
+      return false;
+    }
+
+    return new Promise<boolean>(resolve => {
+      const onAbort = () => {
+        this.stop();
+        resolve(false);
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      ticket.completion.then(completed => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(completed);
+      });
+    });
+  }
+
+  complete(): void {
+    const active = this.active;
+    this.active = null;
+    active?.resolve(true);
+  }
+
+  stop(): void {
+    this.stopped = true;
+    const active = this.active;
+    this.active = null;
+    if (active) this.interrupted = active.value;
+    active?.resolve(false);
+  }
+}
+
+function isProviderRefusal(text: string): boolean {
+  return isContextOverflowObserverOutput(text) ||
+    isQuotaLimitedObserverOutput(text) ||
+    isAuthFailureObserverOutput(text);
+}
+
 export class ClaudeProvider {
   private dbManager: DatabaseManager;
   private sessionManager: SessionManager;
@@ -213,10 +294,8 @@ export class ClaudeProvider {
     // accumulator starts from zero — reset the per-turn cost baseline with it.
     session.lastResultTotalCostUsd = null;
 
-    const activeResponseContext = { current: snapshotResponseContext(session) };
-    const compressField: FieldCompressor = (text, budgetChars) =>
-      this.compressField(text, budgetChars, session, modelId, claudePath);
-    const messageGenerator = this.createMessageGenerator(session, cwdTracker, activeResponseContext, worker, compressField);
+    const turnGate = new TurnGate<ClaudeTurn>();
+    const messageGenerator = this.createMessageGenerator(session, cwdTracker, turnGate, worker);
 
     if (session.memorySessionId) {
       // Observer spawns intentionally opt out of Claude transcript persistence.
@@ -396,8 +475,11 @@ export class ClaudeProvider {
           }
 
           const discoveryTokens = (session.cumulativeInputTokens + session.cumulativeOutputTokens) - tokensBeforeResponse;
-
-          const originalTimestamp = session.earliestPendingTimestamp;
+          const turn = turnGate.current;
+          if (turn) {
+            turn.assistantText.push(textContent);
+            turn.discoveryTokens += discoveryTokens;
+          }
 
           if (responseSize > 0) {
             const truncatedResponse = responseSize > 100
@@ -405,30 +487,68 @@ export class ClaudeProvider {
               : textContent;
             logger.dataOut('SDK', `Response received (${responseSize} chars)`, {
               sessionId: session.sessionDbId,
-              promptNumber: session.lastPromptNumber
+              promptNumber: turn?.responseContext.promptNumber ?? session.lastPromptNumber
             }, truncatedResponse);
           }
-
-          if (typeof textContent === 'string' && textContent.includes('Invalid API key')) {
-            throw new Error('Invalid API key: check your API key configuration in ~/.claude-mem/settings.json or ~/.claude-mem/.env');
-          }
-
-          await processAgentResponse(
-            textContent,
-            session,
-            this.dbManager,
-            this.sessionManager,
-            worker,
-            discoveryTokens,
-            originalTimestamp,
-            'SDK',
-            cwdTracker.lastCwd,
-            modelId,
-            activeResponseContext.current
-          );
         }
 
         if (message.type === 'result') {
+          const turn = turnGate.current;
+          const resultText = (message as any).subtype === 'success' && typeof (message as any).result === 'string'
+            ? (message as any).result
+            : Array.isArray((message as any).errors)
+              ? (message as any).errors.filter((error: unknown) => typeof error === 'string').join('\n')
+              : '';
+          const responseText = resultText || turn?.assistantText.join('\n') || '';
+          const completedSuccessfully =
+            (message as any).subtype === 'success' && (message as any).is_error === false;
+
+          if (turn && completedSuccessfully) {
+            if (responseText.includes('Invalid API key')) {
+              await this.sessionManager.resetProcessingToPending(session.sessionDbId);
+              session.abortReason = 'auth:invalid_api_key';
+              session.abortController.abort();
+              logger.error(
+                'SDK',
+                'Invalid API key: check your API key configuration in ~/.claude-mem/settings.json or ~/.claude-mem/.env',
+                { sessionDbId: session.sessionDbId },
+              );
+            } else {
+              await processAgentResponse(
+                responseText,
+                session,
+                this.dbManager,
+                this.sessionManager,
+                worker,
+                turn.discoveryTokens,
+                turn.originalTimestamp,
+                'SDK',
+                turn.projectRoot,
+                modelId,
+                turn.responseContext,
+              );
+            }
+          } else if (turn && isProviderRefusal(responseText)) {
+            // Failed/synthetic turns are never acknowledgements, but their
+            // provider refusal text still drives the existing quota/auth/
+            // overflow preservation paths.
+            await processAgentResponse(
+              responseText,
+              session,
+              this.dbManager,
+              this.sessionManager,
+              worker,
+              turn.discoveryTokens,
+              turn.originalTimestamp,
+              'SDK',
+              turn.projectRoot,
+              modelId,
+              turn.responseContext,
+            );
+          } else if (turn && !completedSuccessfully) {
+            await this.sessionManager.resetProcessingToPending(session.sessionDbId);
+          }
+
           // The result message carries the turn's finalized usage (per-turn,
           // not cumulative — verified empirically against the SDK) plus a
           // CUMULATIVE total_cost_usd; per-compression cost is the delta
@@ -471,9 +591,25 @@ export class ClaudeProvider {
                   : undefined,
             });
           }
+
+          if (!completedSuccessfully || session.abortController.signal.aborted) {
+            turnGate.stop();
+            break;
+          }
+          turnGate.complete();
         }
       }
     } finally {
+      // query() pumps the input iterable independently of its output iterator.
+      // Release a generator suspended behind an unfinished turn on every exit.
+      turnGate.stop();
+      const unfinishedTurn = turnGate.unfinished;
+      if (
+        unfinishedTurn?.responseContext.source !== 'init' &&
+        session.claimedMessageIds.length > 0
+      ) {
+        await this.sessionManager.resetProcessingToPending(session.sessionDbId);
+      }
       // Safety net for paths where the SDK never invoked the spawn factory;
       // a leaked reservation would occupy an agent slot until worker restart.
       slotReservation.release();
@@ -497,56 +633,11 @@ export class ClaudeProvider {
     });
   }
 
-  /**
-   * One bounded, standalone SDK call that condenses an oversized tool payload.
-   *
-   * Runs as its own short-lived query with `maxTurns: 1` rather than as a turn
-   * in the observer conversation: adding it there would grow the very
-   * conversation the recycle logic exists to bound.
-   */
-  private async compressField(
-    text: string,
-    budgetChars: number,
-    session: ActiveSession,
-    modelId: string,
-    claudePath: string,
-  ): Promise<string | null> {
-    const isolatedEnv = sanitizeEnv(await buildIsolatedEnvWithFreshOAuth());
-    const result = query({
-      prompt: buildFieldCompressionPrompt(text, budgetChars),
-      options: {
-        ...buildHardenedSdkOptions({
-          source: 'Observer',
-          sessionDbId: session.sessionDbId,
-          contentSessionId: session.contentSessionId,
-          project: session.project,
-          model: modelId,
-          env: isolatedEnv,
-          pathToClaudeCodeExecutable: claudePath,
-          abortController: session.abortController,
-        }),
-        maxTurns: 1,
-      },
-    });
-
-    let out = '';
-    for await (const message of result) {
-      if (message.type === 'assistant') {
-        const content = (message as any).message.content;
-        out += Array.isArray(content)
-          ? content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('\n')
-          : typeof content === 'string' ? content : '';
-      }
-    }
-    return out || null;
-  }
-
   private async *createMessageGenerator(
     session: ActiveSession,
     cwdTracker: { lastCwd: string | undefined },
-    activeResponseContext: { current: ReturnType<typeof snapshotResponseContext> },
+    turnGate: TurnGate<ClaudeTurn>,
     worker?: WorkerRef,
-    compressField?: FieldCompressor,
   ): AsyncIterableIterator<SDKUserMessage> {
     const mode = ModeManager.getInstance().getActiveMode();
 
@@ -566,12 +657,18 @@ export class ClaudeProvider {
     const initPrompt = isInitPrompt
       ? buildInitPrompt(session.project, session.contentSessionId, session.userPrompt, mode, priorContext)
       : buildContinuationPrompt(session.userPrompt, session.lastPromptNumber, session.contentSessionId, mode, priorContext);
-    activeResponseContext.current = { ...snapshotResponseContext(session), source: 'init' };
-
     session.conversationHistory.push({ role: 'user', content: initPrompt });
 
     session.lastPromptSentAt = Date.now();
     session.lastGeneratorSource = 'init';
+    const initTurn = turnGate.begin({
+      responseContext: { ...snapshotResponseContext(session), source: 'init' },
+      assistantText: [],
+      discoveryTokens: 0,
+      originalTimestamp: session.earliestPendingTimestamp,
+      projectRoot: cwdTracker.lastCwd,
+    });
+    if (!initTurn) return;
     yield {
       type: 'user',
       message: {
@@ -582,6 +679,7 @@ export class ClaudeProvider {
       parent_tool_use_id: null,
       isSynthetic: true
     };
+    if (!await turnGate.wait(initTurn, session.abortController.signal)) return;
 
     for await (const message of this.sessionManager.getMessageIterator(session.sessionDbId)) {
       session.pendingAgentId = message.agentId ?? null;
@@ -611,31 +709,27 @@ export class ClaudeProvider {
           return;
         }
 
-        // An oversized payload is condensed by a bounded model pass before the
-        // prompt is built, so the observation carries a summary of the whole
-        // field rather than a head/tail slice with the middle cut out (#3800).
-        const optimized = compressField
-          ? await optimizeObservationFields(
-              { toolInput: message.tool_input, toolOutput: message.tool_response },
-              compressField,
-              { sessionDbId: session.sessionDbId, toolName: message.tool_name },
-            )
-          : { toolInput: message.tool_input, toolOutput: message.tool_response };
-
         const obsPrompt = buildObservationPrompt({
           id: 0, // Not used in prompt
           tool_name: message.tool_name!,
-          tool_input: JSON.stringify(optimized.toolInput),
-          tool_output: JSON.stringify(optimized.toolOutput),
+          tool_input: JSON.stringify(message.tool_input),
+          tool_output: JSON.stringify(message.tool_response),
           created_at_epoch: Date.now(),
           cwd: message.cwd
         });
-        activeResponseContext.current = { ...snapshotResponseContext(session), source: 'ingest' };
 
         session.conversationHistory.push({ role: 'user', content: obsPrompt });
 
         session.lastPromptSentAt = Date.now();
         session.lastGeneratorSource = 'ingest';
+        const observationTurn = turnGate.begin({
+          responseContext: { ...snapshotResponseContext(session), source: 'ingest' },
+          assistantText: [],
+          discoveryTokens: 0,
+          originalTimestamp: session.earliestPendingTimestamp,
+          projectRoot: cwdTracker.lastCwd,
+        });
+        if (!observationTurn) return;
         yield {
           type: 'user',
           message: {
@@ -646,6 +740,7 @@ export class ClaudeProvider {
           parent_tool_use_id: null,
           isSynthetic: true
         };
+        if (!await turnGate.wait(observationTurn, session.abortController.signal)) return;
       } else if (message.type === 'summarize') {
         const summaryPrompt = buildSummaryPrompt({
           id: session.sessionDbId,
@@ -654,12 +749,18 @@ export class ClaudeProvider {
           user_prompt: session.userPrompt,
           last_assistant_message: message.last_assistant_message || ''
         }, mode);
-        activeResponseContext.current = { ...snapshotResponseContext(session), source: 'summarize' };
-
         session.conversationHistory.push({ role: 'user', content: summaryPrompt });
 
         session.lastPromptSentAt = Date.now();
         session.lastGeneratorSource = 'summarize';
+        const summaryTurn = turnGate.begin({
+          responseContext: { ...snapshotResponseContext(session), source: 'summarize' },
+          assistantText: [],
+          discoveryTokens: 0,
+          originalTimestamp: session.earliestPendingTimestamp,
+          projectRoot: cwdTracker.lastCwd,
+        });
+        if (!summaryTurn) return;
         yield {
           type: 'user',
           message: {
@@ -670,6 +771,7 @@ export class ClaudeProvider {
           parent_tool_use_id: null,
           isSynthetic: true
         };
+        if (!await turnGate.wait(summaryTurn, session.abortController.signal)) return;
       }
     }
   }
