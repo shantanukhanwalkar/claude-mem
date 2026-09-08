@@ -98,13 +98,17 @@ describe('Edit 4A — user-message banner relocated to systemMessage (not stderr
 });
 
 describe('stream separation invariant', () => {
-  it('emitModelContext sends MODEL_CONTEXT to stdout (never stderr)', () => {
+  it('emitModelContext sends MODEL_CONTEXT to stdout (never stderr)', async () => {
     const real = captureRealStderr();
     const stdoutChunks: string[] = [];
-    const originalLog = console.log;
-    console.log = (...args: unknown[]) => { stdoutChunks.push(args.join(' ')); };
+    const originalWrite = process.stdout.write;
+    process.stdout.write = ((chunk: string, callback: () => void) => {
+      stdoutChunks.push(chunk);
+      callback();
+      return true;
+    }) as typeof process.stdout.write;
     try {
-      emitModelContext(claudeCodeAdapter, {
+      await emitModelContext(claudeCodeAdapter, {
         hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: 'MODEL-ONLY-PAYLOAD' },
       });
       const parsed = JSON.parse(stdoutChunks[0]) as { hookSpecificOutput?: { additionalContext?: string } };
@@ -112,7 +116,7 @@ describe('stream separation invariant', () => {
       // The model-bound text must not leak to stderr.
       expect(real.chunks.join('')).not.toContain('MODEL-ONLY-PAYLOAD');
     } finally {
-      console.log = originalLog;
+      process.stdout.write = originalWrite;
       real.restore();
     }
   });

@@ -28,9 +28,13 @@ function captureRealStderr(): { chunks: string[]; restore: () => void } {
 
 function captureStdout(): { chunks: string[]; restore: () => void } {
   const chunks: string[] = [];
-  const original = console.log;
-  console.log = (...args: unknown[]) => { chunks.push(args.join(' ')); };
-  return { chunks, restore: () => { console.log = original; } };
+  const original = process.stdout.write;
+  process.stdout.write = ((chunk: string, callback: () => void) => {
+    chunks.push(chunk);
+    callback();
+    return true;
+  }) as typeof process.stdout.write;
+  return { chunks, restore: () => { process.stdout.write = original; } };
 }
 
 const fakeAdapter: PlatformAdapter = {
@@ -101,11 +105,11 @@ describe('emitDiagnostic', () => {
 });
 
 describe('emitModelContext', () => {
-  it('calls adapter.formatOutput and JSON.stringifies to stdout', () => {
+  it('calls adapter.formatOutput and JSON.stringifies to stdout', async () => {
     const out = captureStdout();
     try {
       const result: HookResult = { systemMessage: 'hi' };
-      emitModelContext(fakeAdapter, result);
+      await emitModelContext(fakeAdapter, result);
       expect(out.chunks).toHaveLength(1);
       expect(JSON.parse(out.chunks[0])).toEqual({ ok: true, systemMessage: 'hi' });
     } finally {
@@ -113,22 +117,22 @@ describe('emitModelContext', () => {
     }
   });
 
-  it('throws when called twice in the same emitter lifetime', () => {
+  it('throws when called twice in the same emitter lifetime', async () => {
     const out = captureStdout();
     try {
-      emitModelContext(fakeAdapter, {});
+      await emitModelContext(fakeAdapter, {});
       expect(() => emitModelContext(fakeAdapter, {})).toThrow('emitModelContext called twice');
     } finally {
       out.restore();
     }
   });
 
-  it('resetHookIoState clears the double-emit guard', () => {
+  it('resetHookIoState clears the double-emit guard', async () => {
     const out = captureStdout();
     try {
-      emitModelContext(fakeAdapter, {});
+      await emitModelContext(fakeAdapter, {});
       resetHookIoState();
-      expect(() => emitModelContext(fakeAdapter, {})).not.toThrow();
+      await emitModelContext(fakeAdapter, {});
       expect(out.chunks).toHaveLength(2);
     } finally {
       out.restore();
