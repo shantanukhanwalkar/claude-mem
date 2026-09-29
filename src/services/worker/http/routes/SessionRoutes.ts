@@ -369,18 +369,23 @@ export class SessionRoutes extends BaseRouteHandler {
 
         const reason = session.abortReason ?? null;
         session.abortReason = null;  // consume the reason
+        const quotaPause = session.quotaPause;
+        session.quotaPause = null;
         // Quota surfaced as assistant prose aborts here rather than throwing, so
         // it must arm the breaker too — otherwise the prose path keeps the
         // per-observation request storm the classified path no longer has.
         if (normalizeAbortReason(reason) === 'quota') {
-          const quotaMessage = 'Provider reported the inference allowance exhausted';
-          recordQuotaExhausted(provider, quotaMessage, reason?.split(':')[1]);
+          const detail = quotaPause ?? {
+            message: 'Provider reported a usage limit in its response',
+            kind: 'quota_exhausted',
+          };
+          recordQuotaExhausted(provider, detail.message, reason?.split(':')[1]);
           // Quota returned as assistant prose never throws, so it never reaches
           // the .catch above and never armed the health ledger. Without this the
           // session-start warning is structurally blind to an entire outage
           // class: the allowance is spent, no observation will ever store, and
           // the user is told nothing.
-          recordObserverFailure(provider, { message: quotaMessage, kind: 'quota_exhausted' });
+          recordObserverFailure(provider, detail);
         }
         if (reason !== null) {
           // Abort accounting lives HERE, where the reason is consumed — the

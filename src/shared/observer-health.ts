@@ -314,12 +314,40 @@ export function renderObserverHealthWarning(state: ObserverHealthState, nowMs: n
   const count = state.consecutiveFailures;
   const action = state.lastErrorAction ? scrubErrorMessage(state.lastErrorAction) : null;
 
-  // A spent allowance is the one outage a restart cannot clear. Worse, the
-  // restart link is the code path that clears the quota breaker (the process
-  // serving /api/admin/restart is the process holding the cooldown), so
-  // offering it here talks the user into re-opening the per-observation
-  // request storm the breaker exists to stop. Nothing is wedged; the account
-  // is out of allowance. Say that, and relay the provider's own remedy.
+  const isGuard = state.lastErrorKind === 'quota_guard';
+  // Older workers discarded the local guard's reason and used this same text
+  // for both precautionary pauses and provider rejections. Do not infer either.
+  const isLegacyQuota = isQuotaFailure(state)
+    && state.lastErrorMessage === 'Provider reported the inference allowance exhausted';
+  if (isGuard || isLegacyQuota) {
+    return [
+      '⚠️ Heads up: claude-mem memory capture is paused.',
+      '',
+      isGuard
+        ? `Memory capture is paused to preserve your Claude allowance (${sinceText}).`
+        : `The memory observer has a usage-related pause on ${provider} (${sinceText}).`,
+      '',
+      isGuard
+        ? `Reason: ${state.lastErrorMessage ? scrubErrorMessage(state.lastErrorMessage) : 'Precautionary usage guard'}`
+        : 'The previous worker did not distinguish a precautionary pause from a provider rejection.',
+      '',
+      'Existing memories remain available; new memory generation is paused.',
+      'After the 30-minute cooldown, subsequent activity can trigger one retry.',
+      'Capture can resume when usage is below the applicable guard thresholds and the provider accepts requests.',
+      provider === 'claude'
+        ? 'Check Claude Settings → Usage for the current usage and reset time.'
+        : `Check ${provider} usage settings for the current allowance and reset time.`,
+      '',
+      'Restarting does not replenish allowance or clear the persisted cooldown.',
+      '',
+      '(Assistant: tell the user about this pause at the start of your first reply.',
+      'Relay the reason accurately; do not call a precautionary pause provider exhaustion.',
+      'Do NOT restart the worker or change providers to bypass the pause.)',
+    ].join('\n');
+  }
+
+  // A spent allowance cannot be replenished by restarting. The quota breaker
+  // persists across restarts; relay the provider's remedy without a restart link.
   if (isQuotaFailure(state)) {
     return [
       "⚠️ Heads up: claude-mem can't save memories right now.",
@@ -334,10 +362,8 @@ export function renderObserverHealthWarning(state: ObserverHealthState, nowMs: n
       "Until the allowance resets or you add capacity, nothing from this session — or any",
       'other — will be remembered.',
       '',
-      // Deliberately no restart link: nothing is broken to restart, and doing
-      // it disarms the breaker that is currently protecting the account.
-      'Restarting will NOT help here, and it clears the backoff that is currently keeping',
-      'claude-mem from hammering the provider — so please leave the worker alone.',
+      'Restarting does not replenish allowance or clear the persisted cooldown.',
+      'Please leave the worker running while you resolve the usage limit.',
       ...(action ? [] : [
         'Switch the observer to another provider in ~/.claude-mem/settings.json if you need',
         'memory capture before the allowance resets.',

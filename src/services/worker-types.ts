@@ -1,6 +1,11 @@
 
 import type { Response } from 'express';
 
+export interface QuotaPause {
+  kind: 'quota_guard' | 'quota_exhausted';
+  message: string;
+}
+
 export interface ConversationMessage {
   role: 'user' | 'assistant';
   content: string;
@@ -58,6 +63,8 @@ export interface ActiveSession {
   pendingAgentId?: string | null;
   pendingAgentType?: string | null;
   abortReason?: 'idle' | 'shutdown' | 'overflow' | 'restart-guard' | 'quota' | string | null;
+  /** Preserve the quota decision until generator finalization records health. */
+  quotaPause?: QuotaPause | null;
   respawnTimer?: ReturnType<typeof setTimeout>;
   /** When the latest compression prompt was dispatched to the model — telemetry compression_ms. */
   lastPromptSentAt?: number | null;

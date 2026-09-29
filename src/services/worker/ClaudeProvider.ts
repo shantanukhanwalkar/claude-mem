@@ -404,6 +404,7 @@ export class ClaudeProvider {
               authMethod,
             });
             session.abortReason = `quota:${decision.window ?? 'unknown'}`;
+            session.quotaPause = decision.pause;
             try {
               session.abortController.abort();
             } catch {
