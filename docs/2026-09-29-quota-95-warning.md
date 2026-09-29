@@ -35,3 +35,19 @@ Candidate SHA-256:
 - `plugin/scripts/context-generator.cjs`: `0bee413a11e65869a8506ca4b57bfffbc892cad82e709d8846bc923ee6ae9e7a`
 
 Example new guard reason: `Memory capture paused: weekly Claude usage is 95.0%, at or above the 95% pause threshold. This reserves allowance for interactive work.`
+
+## Deployment preparation — 2026-09-29
+
+The owner subsequently authorized: "proceed with the next steps safely to deploy the change". This resolves the repository-level deployment authorization gate. A separate explicit session-level instruction still forbids restarting the worker, so activation was not performed and the owner was informed. No additional user permission was requested for the already-authorized preparation.
+
+Read-only preflight passed all 18 installed provenance/policy checks. PR #1 remains a draft, mergeable with no reported check failures; it has not been merged. The authoritative source checkout and installed worker still match the prior deployment receipt.
+
+Private preparation package:
+
+`/home/sk/.local/state/claude-mem-maintenance/backups/quota-95-prepared-20260929T111208Z`
+
+The package contains 102 hash-verified files: 72 original root/subagent transcripts covering all 29 queued sessions, the frozen worker log and reconstructed queue ledger, installation/configuration/receipt rollback files, and the two candidate bundles. It also contains a consistent SQLite backup taken with the backup API; `PRAGMA quick_check` returned `ok`. Private directories/files are restricted to the owner. The manifest names each source, archived path, length and SHA-256.
+
+Queue reconstruction reconciled 2827 entries to the logged global depth at `2026-09-29 16:39:28.816 IST`. This is an archival checkpoint, not a frozen cutover boundary or a fully validated replay manifest. The active worker continued receiving work; a subsequent read showed 2841 queued entries. Before any eventual activation, refresh the checkpoint, verify the latest source coverage, and complete the runbook's queue-preservation/recovery checks. Do not clear the queue, replay original commands, or assume a database backup preserves the RAM buffer.
+
+Final preparation check: PID 16392 remained healthy, version 13.24.2-local.2. Installed worker hash remained `5e32519e74e84e167e8dcbb2893dff7ea66544a261749ea78eb8f9a992311b2c`. The weekly threshold remains 93% in that process. Provider/model/settings, installed plugin bytes, health/cooldown files and the deployment receipt were not changed. No restart, replay, model smoke test or live database write occurred.
