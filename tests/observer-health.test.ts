@@ -45,6 +45,53 @@ function unhealthyState(overrides: Partial<ObserverHealthState> = {}): ObserverH
 }
 
 describe('observer-health ledger', () => {
+  it('renders a persisted reserve-threshold pause without claiming the provider allowance is exhausted', () => {
+    recordObserverFailure('claude', {
+      kind: 'quota_guard',
+      message: 'Memory capture paused: weekly Claude usage is 95.0%, at or above the 95% pause threshold.',
+    }, healthPath);
+    const warning = renderObserverHealthWarning(readObserverHealth(healthPath)!);
+    expect(warning).toContain('Memory capture is paused to preserve your Claude allowance');
+    expect(warning).toContain('weekly Claude usage is 95.0%');
+    expect(warning).toContain('95% pause threshold');
+    expect(warning).toContain('30-minute cooldown');
+    expect(warning).not.toContain('allowance on claude is used up');
+    expect(warning).not.toContain('nothing from this session');
+    expect(warning).not.toContain('npx claude-mem restart');
+    expect(warning).not.toContain('clears the backoff');
+  });
+
+  it('does not present an ambiguous legacy quota record as a confirmed provider rejection', () => {
+    const warning = renderObserverHealthWarning(unhealthyState({
+      lastErrorProvider: 'claude',
+      lastErrorKind: 'quota_exhausted',
+      lastErrorMessage: 'Provider reported the inference allowance exhausted',
+    }));
+    expect(warning).toContain('usage-related pause');
+    expect(warning).not.toContain('allowance on claude is used up');
+    expect(warning).not.toContain('npx claude-mem restart');
+  });
+
+  it('keeps confirmed provider exhaustion distinct from the reserve guard', () => {
+    const warning = renderObserverHealthWarning(unhealthyState({
+      lastErrorKind: 'quota_exhausted',
+      lastErrorMessage: 'Monthly allowance exhausted (status 402)',
+    }));
+    expect(warning).toContain('allowance on openrouter is used up');
+    expect(warning).not.toContain('clears the backoff');
+    expect(warning).not.toContain('npx claude-mem restart');
+  });
+
+  it('directs legacy quota pauses on other providers to their own usage settings', () => {
+    const warning = renderObserverHealthWarning(unhealthyState({
+      lastErrorProvider: 'openrouter',
+      lastErrorKind: 'quota_exhausted',
+      lastErrorMessage: 'Provider reported the inference allowance exhausted',
+    }));
+    expect(warning).toContain('openrouter usage settings');
+    expect(warning).not.toContain('Claude Settings');
+  });
+
   it('returns null when no health file exists', () => {
     expect(readObserverHealth(healthPath)).toBeNull();
   });

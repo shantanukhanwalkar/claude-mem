@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, spyOn } from 'bun:test';
 import type { ActiveSession } from '../../src/services/worker-types.js';
 import { SessionManager } from '../../src/services/worker/SessionManager.js';
-import { resetQuotaCooldownsForTesting } from '../../src/shared/quota-cooldown.js';
+import { getQuotaCooldown, resetQuotaCooldownsForTesting } from '../../src/shared/quota-cooldown.js';
+import { RateLimitStore, shouldAbortForQuota } from '../../src/services/worker/RateLimitStore.js';
 import { resetDependencyStatusesForTesting } from '../../src/shared/dependency-health.js';
 import * as observerHealth from '../../src/shared/observer-health.js';
 
@@ -164,6 +165,33 @@ describe('observer resumes itself after recycling its conversation (#3800)', () 
     await nextTick();
 
     expect(starts).toBe(1);
+  });
+
+  it('preserves the quota guard decision through finalization, persisted health, and the user warning', async () => {
+    const session = makeSession();
+    const store = new RateLimitStore();
+    store.set({ rateLimitType: 'seven_day', utilization: 0.95 });
+    const decision = shouldAbortForQuota('cli', store);
+    expect(decision.abort).toBe(true);
+    const { routes, stats } = buildRoutes(session, async () => {
+      session.abortReason = `quota:${decision.window}`;
+      session.quotaPause = decision.pause;
+      session.abortController.abort();
+    });
+
+    await routes.ensureGeneratorRunning(session.sessionDbId, 'observation');
+    await session.generatorPromise;
+
+    const health = observerHealth.readObserverHealth()!;
+    expect(health.lastErrorKind).toBe('quota_guard');
+    expect(health.lastErrorMessage).toContain('95% pause threshold');
+    expect(observerHealth.renderObserverHealthWarning(health)).toContain('paused to preserve');
+    expect(getQuotaCooldown('claude')?.message).toBe(health.lastErrorMessage);
+    expect(getQuotaCooldown('claude')?.window).toBe('seven_day');
+    expect(session.quotaPause).toBeNull();
+    expect(session.abortReason).toBeNull();
+    expect(stats().finalizeCalls).toBe(0);
+    expect(stats().removed).toBe(0);
   });
 
   it('does not resume on an auth pause', async () => {

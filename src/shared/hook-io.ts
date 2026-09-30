@@ -111,16 +111,20 @@ export function emitDiagnostic(line: string): void {
  * JSON.stringify exactly once. Throws if called twice in the same emitter
  * lifetime (guards against double-emit corrupting the stdout JSON stream).
  *
- * Uses console.log (not process.stdout.write) on purpose: the trailing newline
- * is what Claude Code's / Codex's hook parser expects.
+ * Include the trailing newline expected by hook parsers and wait for the
+ * stream write to complete before callers may exit. Once Node-compatible
+ * stdout is initialized, Bun's console.log can buffer data past process.exit.
  */
-export function emitModelContext(adapter: PlatformAdapter, result: HookResult): void {
+export function emitModelContext(adapter: PlatformAdapter, result: HookResult): Promise<void> {
   if (moduleHasEmitted) {
     throw new Error('emitModelContext called twice');
   }
   moduleHasEmitted = true;
   const output = adapter.formatOutput(result);
-  console.log(JSON.stringify(output));
+  const payload = `${JSON.stringify(output)}\n`;
+  return new Promise((resolve, reject) => {
+    process.stdout.write(payload, error => error ? reject(error) : resolve());
+  });
 }
 
 let moduleHasEmitted = false;

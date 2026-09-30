@@ -94,7 +94,7 @@ async function executeHookPipeline(
   const result = await handler.execute(input);
 
   // MODEL_CONTEXT: the only stdout JSON emit, via the platform adapter.
-  emitModelContext(adapter, result);
+  await emitModelContext(adapter, result);
   const exitCode = result.exitCode ?? HOOK_EXIT_CODES.SUCCESS;
   exitGraceful(options);
   return exitCode;
@@ -126,13 +126,13 @@ export async function hookCommand(platform: string, event: string, options: Hook
   } catch (error) {
     if (error instanceof AdapterRejectedInput) {
       logger.warn('HOOK', `Adapter rejected input (${error.reason}), skipping hook`);
-      emitModelContext(adapter, buildNoOpResult(event));
+      await emitModelContext(adapter, buildNoOpResult(event));
       exitGraceful(options);
       return HOOK_EXIT_CODES.SUCCESS;
     }
     if (isNonBlockingHookInputError(error)) {
       logger.warn('HOOK', `Hook input unavailable, skipping hook: ${error instanceof Error ? error.message : error}`);
-      emitModelContext(adapter, buildNoOpResult(event));
+      await emitModelContext(adapter, buildNoOpResult(event));
       exitGraceful(options);
       return HOOK_EXIT_CODES.SUCCESS;
     }

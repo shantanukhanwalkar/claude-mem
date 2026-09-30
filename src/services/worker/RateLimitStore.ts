@@ -205,9 +205,21 @@ const UTILIZATION_THRESHOLDS: Record<RateLimitWindow, number> = {
   five_hour: 0.95,
   seven_day_opus: 0.93,
   seven_day_sonnet: 0.92,
-  seven_day: 0.93,
+  seven_day: 0.95,
   overage: 0.95,
 };
+
+const WINDOW_LABELS: Record<RateLimitWindow, string> = {
+  five_hour: 'five-hour',
+  seven_day_opus: 'weekly Opus',
+  seven_day_sonnet: 'weekly Sonnet',
+  seven_day: 'weekly',
+  overage: 'extra-usage',
+};
+
+type QuotaDecision =
+  | { abort: false; reason?: undefined; window?: undefined; pause?: undefined }
+  | { abort: true; reason: string; window: RateLimitWindow; pause: import('../worker-types.js').QuotaPause };
 
 const RATE_LIMIT_WINDOWS: readonly RateLimitWindow[] = [
   'five_hour',
@@ -236,7 +248,7 @@ export function shouldAbortForQuota(
   authMethod: string,
   store: RateLimitStore,
   now: number = Date.now(),
-): { abort: boolean; reason?: string; window?: RateLimitWindow } {
+): QuotaDecision {
   // API-key users authorized per-call spend; the wall-clock guard is for
   // subscription quota only.
   if (isApiKeyAuth(authMethod)) {
@@ -247,10 +259,6 @@ export function shouldAbortForQuota(
     const entry = store.get(window);
     if (!entry) continue;
 
-    const util = entry.utilization;
-    const threshold = UTILIZATION_THRESHOLDS[window];
-
-    const resetsAtMs = epochMilliseconds(entry.resetsAt);
     const entryExpired = hasElapsedReset(entry.resetsAt, now);
 
     // Provider-side rejection trumps utilization heuristics. A snapshot with
@@ -262,6 +270,10 @@ export function shouldAbortForQuota(
         abort: true,
         window,
         reason: `quota:${window} rejected by provider`,
+        pause: {
+          kind: 'quota_exhausted',
+          message: `Claude rejected the request because its ${WINDOW_LABELS[window]} usage allowance is exhausted.`,
+        },
       };
     }
 
@@ -275,16 +287,33 @@ export function shouldAbortForQuota(
         abort: true,
         window,
         reason: `quota:${window} rejected by provider`,
+        pause: {
+          kind: 'quota_exhausted',
+          message: `Claude rejected the request because its ${WINDOW_LABELS[window]} usage allowance is exhausted.`,
+        },
       };
     }
 
-    if (entryExpired) continue;
+  }
+
+  // Check all provider rejections before any local guard, so a confirmed
+  // exhausted bucket cannot be hidden by an earlier precautionary pause.
+  for (const window of RATE_LIMIT_WINDOWS) {
+    const entry = store.get(window);
+    if (!entry || hasElapsedReset(entry.resetsAt, now)) continue;
+    const util = entry.utilization;
+    const threshold = UTILIZATION_THRESHOLDS[window];
+    const resetsAtMs = epochMilliseconds(entry.resetsAt);
 
     if (typeof util === 'number' && util >= threshold) {
       return {
         abort: true,
         window,
         reason: `quota:${window} utilization ${(util * 100).toFixed(1)}% >= ${(threshold * 100).toFixed(0)}%`,
+        pause: {
+          kind: 'quota_guard',
+          message: `Memory capture paused: ${WINDOW_LABELS[window]} Claude usage is ${(util * 100).toFixed(1)}%, at or above the ${(threshold * 100).toFixed(0)}% pause threshold. This reserves allowance for interactive work.`,
+        },
       };
     }
 
@@ -303,6 +332,10 @@ export function shouldAbortForQuota(
           abort: true,
           window,
           reason: `quota:${window} resets in ${Math.round(msUntilReset / 60000)}m (grace buffer ${RESET_GRACE_MS / 60000}m, util ${(util * 100).toFixed(1)}%)`,
+          pause: {
+            kind: 'quota_guard',
+            message: `Memory capture paused: five-hour Claude usage is ${(util * 100).toFixed(1)}% and resets in ${Math.round(msUntilReset / 60000)} minutes, within the ${RESET_GRACE_MS / 60000}-minute reserve buffer.`,
+          },
         };
       }
     }

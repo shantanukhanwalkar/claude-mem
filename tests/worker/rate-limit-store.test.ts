@@ -123,6 +123,47 @@ describe('shouldAbortForQuota — cli/oauth auth', () => {
     store = freshStore();
   });
 
+  it.each([0.93, 0.94, 0.9499])('continues weekly capture at utilization %s below the 95% reserve threshold', utilization => {
+    store.set({ rateLimitType: 'seven_day', utilization, status: 'allowed_warning' });
+    expect(shouldAbortForQuota(cliAuth, store, FIXED_NOW).abort).toBe(false);
+  });
+
+  it.each([0.95, 0.96])('pauses weekly capture at utilization %s and preserves the local guard explanation', utilization => {
+    store.set({ rateLimitType: 'seven_day', utilization });
+    const decision = shouldAbortForQuota(cliAuth, store, FIXED_NOW);
+    expect(decision.abort).toBe(true);
+    expect(decision.pause?.kind).toBe('quota_guard');
+    expect(decision.pause?.message).toContain(`${(utilization * 100).toFixed(1)}%`);
+    expect(decision.pause?.message).toContain('95% pause threshold');
+    expect(decision.pause?.message).toContain('weekly Claude usage');
+    expect(decision.pause?.message).not.toContain('exhausted');
+  });
+
+  it('still reports a provider rejection below the weekly reserve threshold as exhausted', () => {
+    store.set({ rateLimitType: 'seven_day', utilization: 0.5, status: 'rejected' });
+    const decision = shouldAbortForQuota(cliAuth, store, FIXED_NOW);
+    expect(decision.abort).toBe(true);
+    expect(decision.pause?.kind).toBe('quota_exhausted');
+    expect(decision.pause?.message).toContain('rejected');
+    expect(decision.pause?.message).not.toContain('pause threshold');
+  });
+
+  it('prioritizes a confirmed weekly rejection over a five-hour precautionary guard', () => {
+    store.set({ rateLimitType: 'five_hour', utilization: 0.96 });
+    store.set({ rateLimitType: 'seven_day', status: 'rejected' });
+    const decision = shouldAbortForQuota(cliAuth, store, FIXED_NOW);
+    expect(decision.window).toBe('seven_day');
+    expect(decision.pause?.kind).toBe('quota_exhausted');
+  });
+
+  it('reports the five-hour reset buffer as a precautionary pause', () => {
+    store.set({ rateLimitType: 'five_hour', utilization: 0.9, resetsAt: FIXED_NOW + 600_000 });
+    const decision = shouldAbortForQuota(cliAuth, store, FIXED_NOW);
+    expect(decision.pause?.kind).toBe('quota_guard');
+    expect(decision.pause?.message).toContain('10 minutes');
+    expect(decision.pause?.message).not.toContain('exhausted');
+  });
+
   it('aborts on five_hour at 0.96 with reason mentioning "five_hour"', () => {
     store.set({ rateLimitType: 'five_hour', utilization: 0.96 });
     const decision = shouldAbortForQuota(cliAuth, store, FIXED_NOW);

@@ -1,5 +1,6 @@
 import { afterAll, describe, it, expect, mock } from 'bun:test';
 import type { ActiveSession, PendingMessageWithId, SDKUserMessage } from '../../src/services/worker-types.js';
+import { globalRateLimitStore } from '../../src/services/worker/RateLimitStore.js';
 
 const realSdk = { ...(await import('@anthropic-ai/claude-agent-sdk')) };
 const realFindClaude = { ...(await import('../../src/shared/find-claude-executable.js')) };
@@ -340,6 +341,29 @@ async function within<T>(promise: Promise<T>, timeoutMs = 500): Promise<T> {
 }
 
 describe('ClaudeProvider streaming turn ordering', () => {
+  it('carries the actual weekly quota guard reason out of the SDK stream', async () => {
+    activeQuery = undefined;
+    const { session, provider } = makeHarness([]);
+    const run = provider.startSession(session);
+    try {
+      for (let attempt = 0; attempt < 10 && !activeQuery; attempt++) await settle();
+      expect(activeQuery).toBeDefined();
+      activeQuery!.output.push({
+        type: 'rate_limit_event',
+        rate_limit_info: { rateLimitType: 'seven_day', utilization: 0.95 },
+      });
+      activeQuery!.output.close();
+      await within(run);
+      expect(session.abortReason).toBe('quota:seven_day');
+      expect(session.quotaPause?.kind).toBe('quota_guard');
+      expect(session.quotaPause?.message).toContain('95% pause threshold');
+    } finally {
+      globalRateLimitStore.set({ rateLimitType: 'seven_day', utilization: 0, status: 'allowed' });
+      activeQuery?.output.close();
+      await run;
+    }
+  });
+
   it('starts a recycled generation without nulling durable observation and summary foreign keys', async () => {
     processed.length = 0;
     activeQuery = undefined;
