@@ -13,11 +13,15 @@ import * as observerHealth from '../../src/shared/observer-health.js';
 // finalized, no generator left hanging — never the mechanism (the fork's
 // TurnGate, upstream's pacer) that happens to implement it.
 //
-// A probe marked `it.failing` is a scenario upstream v13.32.0 does NOT satisfy.
-// The inversion keeps the suite green while recording the gap; when upstream
-// closes it the probe turns red and should be flipped back to `it`. The exact
-// failing assertion for each, and the one-line mutation under which every
-// probe here flips, are recorded in docs/2026-10-06-contract-6-probes.md.
+// On plain upstream v13.32.0 six of these failed: ClaudeProvider named no
+// reason and released no claim when the SDK stream ended or threw, so the exit
+// reached GeneratorExitHandler as null and the buffer was finalized away. The
+// carried fix (releaseClaimedBatchForTransportExit: `transport:sdk_eof` after
+// the loop, `transport:sdk_stream` in the catch) closes five of them; the
+// stream probes below are its regression tests. The two still marked
+// `it.failing` are design divergences left in place, explained inline. The
+// per-probe control mutations are recorded in
+// docs/2026-10-06-contract-6-probes.md.
 
 const actualAgentSdk = { ...(await import('@anthropic-ai/claude-agent-sdk')) };
 const actualFindClaude = { ...(await import('../../src/shared/find-claude-executable.js')) };
@@ -393,8 +397,7 @@ describe('contract 6 — a failed result frame', () => {
 });
 
 describe('contract 6 — the SDK stream ends or breaks', () => {
-  // UPSTREAM GAP: the claim stays claimed, abortReason stays null, and the exit handler finalizes the session (buffer disposed).
-  it.failing('clean EOF mid-batch releases the claim and leaves the session for the next generation', async () => {
+  it('clean EOF mid-batch releases the claim and leaves the session for the next generation', async () => {
     const h = createHarness(1);
     liveSessions.push(h.session);
     const { run } = await claimFirstObservation(h);
@@ -410,8 +413,7 @@ describe('contract 6 — the SDK stream ends or breaks', () => {
     expect(outcome).toEqual({ finalized: 0, sessionKept: true, pending: 1 });
   });
 
-  // UPSTREAM GAP: the error surfaces, but the claim stays claimed, abortReason stays null, and the exit handler finalizes.
-  it.failing('a thrown output iterator mid-batch surfaces the error and preserves the batch', async () => {
+  it('a thrown output iterator mid-batch surfaces the error and preserves the batch', async () => {
     const h = createHarness(1);
     liveSessions.push(h.session);
     const { run } = await claimFirstObservation(h);
@@ -427,8 +429,7 @@ describe('contract 6 — the SDK stream ends or breaks', () => {
     expect(outcome).toEqual({ finalized: 0, sessionKept: true, pending: 1 });
   });
 
-  // UPSTREAM GAP: same shape as the thrown iterator — the claim is never released and the exit handler finalizes.
-  it.failing('a throw inside response processing surfaces the error and preserves the batch', async () => {
+  it('a throw inside response processing surfaces the error and preserves the batch', async () => {
     const h = createHarness(1);
     liveSessions.push(h.session);
     const { run } = await claimFirstObservation(h);
@@ -446,8 +447,7 @@ describe('contract 6 — the SDK stream ends or breaks', () => {
     expect(outcome).toEqual({ finalized: 0, sessionKept: true, pending: 1 });
   });
 
-  // UPSTREAM GAP: the backlog is still buffered when the run ends, but abortReason is null, so the exit handler finalizes and disposes it.
-  it.failing('EOF during the init turn keeps the unclaimed backlog for the next generation', async () => {
+  it('EOF during the init turn keeps the unclaimed backlog for the next generation', async () => {
     const h = createHarness(1);
     liveSessions.push(h.session);
     const run = h.provider.startSession(h.session);
@@ -464,8 +464,7 @@ describe('contract 6 — the SDK stream ends or breaks', () => {
     expect(outcome).toEqual({ finalized: 0, sessionKept: true, pending: 1 });
   });
 
-  // UPSTREAM GAP: pacer.close() releases a generator parked on the pacer, not one parked in the drain; it hangs until the 3-minute idle timeout.
-  it.failing('EOF while the generator waits between turns releases the generator', async () => {
+  it('EOF while the generator waits between turns releases the generator', async () => {
     const h = createHarness(0);
     liveSessions.push(h.session);
     const run = h.provider.startSession(h.session);
@@ -677,6 +676,93 @@ describe('contract 6 — a generator that throws, seen from the runner', () => {
     return { routes, session, sessionManager, finalizeCalls: () => finalizeCalls };
   }
 
+  /** The routes with the REAL ClaudeProvider as the Claude agent, over a real buffer. */
+  async function buildRoutesWithRealProvider(sessionDbId: number) {
+    const dbManager = {
+      getSessionById: () => ({
+        content_session_id: `content-${sessionDbId}`,
+        memory_session_id: null,
+        project: 'observer-project',
+        platform_source: 'claude',
+        user_prompt: 'work through the backlog',
+        observed_model: null,
+        observed_billing: null,
+      }),
+      getSessionStore: () => ({
+        getPromptNumberFromUserPrompts: () => 1,
+        ensureMemorySessionIdRegistered: (_id: number, memoryId: string) => memoryId,
+        updateMemorySessionId: () => {},
+        storeObservations: () => ({ observationIds: [1], summaryId: null, createdAtEpoch: Date.now() }),
+        linkToolUsesToObservation: () => 0,
+      }),
+      getChromaSync: () => null,
+      getCloudSync: () => null,
+    };
+    const sessionManager = new SessionManager(dbManager as never);
+    const session = sessionManager.initializeSession(sessionDbId, 'work through the backlog', 1);
+    sessionManager.queueObservation(sessionDbId, {
+      tool_name: 'Bash',
+      tool_input: { command: 'step 0' },
+      tool_response: 'queued work',
+      prompt_number: 2,
+      toolUseId: `tool-${sessionDbId}`,
+    });
+    const provider = new ClaudeProvider(dbManager as never, sessionManager as never);
+    let finalizeCalls = 0;
+    const routes = new SessionRoutes(
+      sessionManager,
+      dbManager as never,
+      provider as never,
+      { startSession: async () => {} } as never,
+      { startSession: async () => {} } as never,
+      {} as never,
+      {} as never,
+      { finalizeSession: async () => { finalizeCalls += 1; } } as never,
+    );
+    return { routes, session, sessionManager, finalizeCalls: () => finalizeCalls };
+  }
+
+  it('an Invalid API key status line is booked as the refused credential it is, not paused as transport', async () => {
+    // Captured at booking time, before the runner's finally consumes abortReason.
+    const booked: Array<{ args: unknown[]; abortReason: string | null; claimed: number[] }> = [];
+    const { routes, session, sessionManager, finalizeCalls } = await buildRoutesWithRealProvider(6109);
+    liveSessions.push(session);
+    const recordFailure = spyOn(observerHealth, 'recordObserverFailure').mockImplementation((...args: unknown[]) => {
+      booked.push({ args, abortReason: session.abortReason ?? null, claimed: [...session.claimedMessageIds] });
+    });
+    try {
+      await routes.ensureGeneratorRunning(session.sessionDbId, 'observation');
+      await sdkStarted();
+      await sdk().until(() => sdk().prompts.length >= 1, 'init prompt');
+      sdk().answer(SKIP_REPLY);
+      await sdk().until(() => sdk().prompts.length >= 2, 'first observation');
+      const claimedId = session.claimedMessageIds[0];
+      expect(claimedId).toBeDefined();
+
+      // The CLI's own auth-failure status line, mid-batch.
+      sdk().frame({
+        type: 'assistant',
+        error: 'authentication_failed',
+        message: { content: [{ type: 'text', text: 'Invalid API key · Please run /login' }], usage: {} },
+      });
+      await withTimeout(session.generatorPromise ?? Promise.resolve(), 'generator chain after auth failure');
+      await settle(5);
+
+      // Booked with the provider's words; the provider named no reason and
+      // released nothing — a bad key is not a transport fault to retry.
+      expect(booked).toHaveLength(1);
+      expect(booked[0].args[0]).toBe('claude');
+      expect(String(booked[0].args[1])).toContain('Invalid API key');
+      expect(booked[0].abortReason).toBeNull();
+      expect(booked[0].claimed).toEqual([claimedId]);
+      // Upstream's design for a booked failure: finalized, not re-queued.
+      expect(finalizeCalls()).toBe(1);
+      expect(sessionManager.getSession(session.sessionDbId)).toBeUndefined();
+    } finally {
+      recordFailure.mockRestore();
+    }
+  });
+
   it('books an unclassified stream failure in observer health and does not retry it', async () => {
     let starts = 0;
     const recordFailure = spyOn(observerHealth, 'recordObserverFailure').mockImplementation(() => {});
@@ -696,7 +782,12 @@ describe('contract 6 — a generator that throws, seen from the runner', () => {
     }
   });
 
-  // UPSTREAM GAP: an unclassified throw is booked and then finalized (GeneratorExitHandler: "anything still buffered is dropped here").
+  // UPSTREAM GAP, kept as a divergence: an unclassified throw that reaches the
+  // runner is booked and then finalized (GeneratorExitHandler: "anything still
+  // buffered is dropped here and recovered ... by replaying the transcript").
+  // With the carried ClaudeProvider fix, SDK-originated failures no longer
+  // reach this branch (they arrive as `transport:` pauses), so only a provider
+  // that throws before its stream opens lands here, and that is upstream's call.
   it.failing('keeps the real buffered work after an unclassified stream failure', async () => {
     const recordFailure = spyOn(observerHealth, 'recordObserverFailure').mockImplementation(() => {});
     try {
