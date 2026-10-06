@@ -12,16 +12,20 @@
 # Options: --candidate DIR (default /home/sk/worktrees/claude-mem-candidate-13.32)
 #          --version V (default 13.32.1-local.1)  --queue-wait-min N (default 25)
 #          --skip-codex   leave the Codex copy alone (Claude side only)
+#          --allow-queue  do not wait for queueDepth 0; archive the transcripts of every
+#                         session with queued work in the last 36h and record the boundary
+#                         (owner-decided alternative when the old worker cannot drain)
 set -uo pipefail
 export PATH="$HOME/.bun/bin:$HOME/.local/bin:$HOME/.nvm/versions/node/v24.13.0/bin:/usr/local/bin:/usr/bin:/bin"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}"
 
-MODE=""; CANDIDATE=/home/sk/worktrees/claude-mem-candidate-13.32; VERSION=13.32.1-local.1; QUEUE_WAIT_MIN=25; SKIP_CODEX=0
+MODE=""; CANDIDATE=/home/sk/worktrees/claude-mem-candidate-13.32; VERSION=13.32.1-local.1; QUEUE_WAIT_MIN=25; SKIP_CODEX=0; ALLOW_QUEUE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) MODE=check ;; --apply) MODE=apply ;;
     --candidate) CANDIDATE="$2"; shift ;; --version) VERSION="$2"; shift ;;
     --queue-wait-min) QUEUE_WAIT_MIN="$2"; shift ;; --skip-codex) SKIP_CODEX=1 ;;
+    --allow-queue) ALLOW_QUEUE=1 ;;   # runbook step 4 alternative: the queue cannot drain; archive the transcripts of the pending interval and proceed
     -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac; shift
@@ -115,11 +119,16 @@ if [ "$MODE" = check ]; then
 fi
 
 # ---- apply ------------------------------------------------------------------
-step "P0 wait for an empty RAM queue (up to $QUEUE_WAIT_MIN min)"
-deadline=$(( $(date +%s) + QUEUE_WAIT_MIN*60 ))
-while :; do q=$(queue_depth); log "queueDepth=${q:-unknown}"; [ "$q" = 0 ] && break; [ $(date +%s) -ge $deadline ] && die "queue never drained (last ${q:-unknown})"; sleep 30; done
+if [ "$ALLOW_QUEUE" = 1 ]; then
+  step "P0 --allow-queue: not waiting for an empty RAM queue (queueDepth=$(queue_depth)); transcripts of the pending interval are archived in P1"
+else
+  step "P0 wait for an empty RAM queue (up to $QUEUE_WAIT_MIN min)"
+  deadline=$(( $(date +%s) + QUEUE_WAIT_MIN*60 ))
+  while :; do q=$(queue_depth); log "queueDepth=${q:-unknown}"; [ "$q" = 0 ] && break; [ $(date +%s) -ge $deadline ] && die "queue never drained (last ${q:-unknown})"; sleep 30; done
+fi
 step "P0 preflight"
-"$PREFLIGHT" --check --candidate "$CANDIDATE" --commit "$CAND_TIP" --expect-version "$VERSION" --worker-sha "$EXPECT_WORKER_SHA" --ctx-sha "$EXPECT_CTX_SHA" > "$LOGDIR/preflight-$TS.txt" 2>&1
+pfq=""; [ "$ALLOW_QUEUE" = 1 ] && pfq="--allow-queue"
+"$PREFLIGHT" --check $pfq --candidate "$CANDIDATE" --commit "$CAND_TIP" --expect-version "$VERSION" --worker-sha "$EXPECT_WORKER_SHA" --ctx-sha "$EXPECT_CTX_SHA" > "$LOGDIR/preflight-$TS.txt" 2>&1
 cat "$LOGDIR/preflight-$TS.txt" | tee -a "$LOG" >/dev/null
 # the only acceptable FAIL before install is the threshold key, which P6 writes
 other=$(grep '^FAIL' "$LOGDIR/preflight-$TS.txt" | grep -v -c settings-threshold)
@@ -135,10 +144,18 @@ for f in quota-cooldown.json observer-health.json worker.pid; do [ -f "$HOME/.cl
 git -C "$MARKETPLACE" status --porcelain | awk '{print $2}' | while read -r f; do [ -f "$MARKETPLACE/$f" ] && mkdir -p "$ARCHIVE/marketplace-dirty/$(dirname "$f")" && cp -a "$MARKETPLACE/$f" "$ARCHIVE/marketplace-dirty/$f"; done
 for kind in claude codex marketplace; do r=$(json "$RECEIPT" "d['installationRoots']['$kind']"); mkdir -p "$ARCHIVE/old-roots/$kind"; cp -a "$r/package.json" "$r/scripts" "$ARCHIVE/old-roots/$kind/" 2>/dev/null; cp -a "$r/.claude-plugin" "$r/.codex-plugin" "$ARCHIVE/old-roots/$kind/" 2>/dev/null; done
 tar -C "$(dirname "$OLD_CLAUDE_ROOT")" -czf "$ARCHIVE/old-claude-root.tgz" "$(basename "$OLD_CLAUDE_ROOT")" || die "old Claude root tar failed"
+# Transcripts of every session that enqueued work in the last 36h: the RAM queue is not
+# persisted, so these files are the source for any later controlled replay.
+mkdir -p "$ARCHIVE/transcripts"; WORKER_LOG=$(ls -t "$HOME/.claude-mem/logs"/claude-mem-*.log | head -1)
+since=$(date -u -d '-36 hours' +%Y-%m-%d); grep -h -E "^\[($since|$(date -u +%Y-%m-%d)|$(date -u -d yesterday +%Y-%m-%d))" "$WORKER_LOG" | grep -E 'ENQUEUED|STORED|paused for|Generator exited' > "$ARCHIVE/queue-events.log"
+ids=$(grep -o -E 'sessionDbId=[0-9]+' "$ARCHIVE/queue-events.log" | cut -d= -f2 | sort -u | tr '\n' ',' | sed 's/,$//')
+bun -e "const {Database}=require('bun:sqlite'); const d=new Database('$DB',{readonly:true}); for (const r of d.query('select id, content_session_id as c, project as p from sdk_sessions where id in ($ids)').all()) console.log(r.id+' '+r.c+' '+r.p);" > "$ARCHIVE/pending-sessions.txt" 2>>"$LOG"
+while read -r sid csid proj; do find "$HOME/.claude/projects" "$HOME/.codex/sessions" -maxdepth 4 \( -name "$csid.jsonl" -o -path "*/$csid/*" \) -type f 2>/dev/null | while read -r f; do rel=${f#$HOME/}; mkdir -p "$ARCHIVE/transcripts/$(dirname "$rel")"; cp -a "$f" "$ARCHIVE/transcripts/$rel"; done; done < "$ARCHIVE/pending-sessions.txt"
+log "archived $(find "$ARCHIVE/transcripts" -type f | wc -l) transcript files for $(wc -l < "$ARCHIVE/pending-sessions.txt") sessions; queueDepth now $(queue_depth)"
 (cd "$ARCHIVE" && find . -type f ! -name sha256.txt -exec sha256sum {} + > sha256.txt)
-python3 - "$ARCHIVE/manifest.json" "$CAND_TIP" "$OLD_REMOTE_TIP" "$MKT_HEAD" "$OLD_PID" "$VERSION" "$OLD_VERSION" "$EXPECT_WORKER_SHA" <<'PY'
+python3 - "$ARCHIVE/manifest.json" "$CAND_TIP" "$OLD_REMOTE_TIP" "$MKT_HEAD" "$OLD_PID" "$VERSION" "$OLD_VERSION" "$EXPECT_WORKER_SHA" "$(queue_depth)" <<'PY'
 import json,sys,datetime
-a=sys.argv; json.dump({'createdAt':datetime.datetime.utcnow().isoformat()+'Z','status':'prepared-not-activated','candidateCommit':a[2],'oldRemoteLocalStable':a[3],'oldMarketplaceHead':a[4],'oldWorkerPid':a[5],'newVersion':a[6],'oldVersion':a[7],'expectedWorkerSha256':a[8],'queueDepthAtBoundary':0},open(a[1],'w'),indent=1)
+a=sys.argv; json.dump({'createdAt':datetime.datetime.utcnow().isoformat()+'Z','status':'prepared-not-activated','candidateCommit':a[2],'oldRemoteLocalStable':a[3],'oldMarketplaceHead':a[4],'oldWorkerPid':a[5],'newVersion':a[6],'oldVersion':a[7],'expectedWorkerSha256':a[8],'queueDepthAtBoundary':int(a[9]) if len(a)>9 and a[9].isdigit() else 0},open(a[1],'w'),indent=1)
 PY
 log "archive written ($(wc -l < "$ARCHIVE/sha256.txt") files)"
 
@@ -208,8 +225,11 @@ log "settings ok; provider unchanged ($(json "$SETTINGS" "d.get('CLAUDE_MEM_PROV
 
 step "P7 restart: API shutdown of PID $OLD_PID, then start from the new root"
 PHASE=restart
-q=$(queue_depth); [ "$q" = 0 ] || { for i in $(seq 1 10); do sleep 30; q=$(queue_depth); [ "$q" = 0 ] && break; done; }
-[ "$q" = 0 ] || die "queue refilled to $q before the restart"
+q=$(queue_depth)
+if [ "$ALLOW_QUEUE" = 1 ]; then log "restart with queueDepth=$q by owner decision (transcripts archived)"; else
+  [ "$q" = 0 ] || { for i in $(seq 1 10); do sleep 30; q=$(queue_depth); [ "$q" = 0 ] && break; done; }
+  [ "$q" = 0 ] || die "queue refilled to $q before the restart"
+fi
 boundary=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 curl -s -m 10 -X POST "$WORKER_URL/api/admin/shutdown" >>"$LOG" 2>&1; log "shutdown requested at $boundary rc=$?"
 for i in $(seq 1 30); do kill -0 "$OLD_PID" 2>/dev/null || break; sleep 3; done
@@ -242,12 +262,12 @@ log "host checkout at ${CAND_TIP:0:9}"
 
 step "P9 receipt"
 PHASE=receipt
-python3 - "$RECEIPT" "$ARCHIVE/deployment.json" "$VERSION" "$CAND_TIP" "$EXPECT_WORKER_SHA" "$EXPECT_CTX_SHA" "$NEW_CLAUDE_ROOT" "${NEW_CODEX_ROOT:-$OLD_CODEX_ROOT}" "$MARKETPLACE/plugin" "$KNOWN_JSON" "$HOST_SRC" "$NEW_WORKER_PID" "$OLD_PID" "$ARCHIVE" "$boundary" "$H" <<'PY' || die "receipt write failed"
+python3 - "$RECEIPT" "$ARCHIVE/deployment.json" "$VERSION" "$CAND_TIP" "$EXPECT_WORKER_SHA" "$EXPECT_CTX_SHA" "$NEW_CLAUDE_ROOT" "${NEW_CODEX_ROOT:-$OLD_CODEX_ROOT}" "$MARKETPLACE/plugin" "$KNOWN_JSON" "$HOST_SRC" "$NEW_WORKER_PID" "$OLD_PID" "$ARCHIVE" "$boundary" "$H" "${q:-0}" <<'PY' || die "receipt write failed"
 import json,sys,datetime
-(p,oldp,ver,commit,wsha,csha,croot,xroot,mroot,known,src,pid,oldpid,archive,boundary,health)=sys.argv[1:17]
+(p,oldp,ver,commit,wsha,csha,croot,xroot,mroot,known,src,pid,oldpid,archive,boundary,health,qd)=sys.argv[1:18]; qd=int(qd) if qd.isdigit() else 0
 old=json.load(open(oldp)); now=datetime.datetime.utcnow().isoformat()+'Z'
 hist=list(old.get('workerPidHistory') or []); hist.append({'pid':int(oldpid),'startedAt':old.get('workerPidObservedAt'),'endedBy':f'API shutdown {boundary} for 13.32.1-local.1 adoption (HAR-1103)'})
-rec={'schemaVersion':1,'version':ver,'commit':commit,'workerSha256':wsha,'installationRoots':{'claude':croot,'codex':xroot,'marketplace':mroot},'knownMarketplacesPath':known,'sourceRoot':src,'contextGeneratorSha256':csha,'activatedAt':now,'weeklyPauseThreshold':0.95,'weeklyPauseThresholdSource':'settings.json CLAUDE_MEM_QUOTA_THRESHOLD_SEVEN_DAY','workerPid':int(pid),'previousWorkerPid':int(oldpid),'workerPidObservedAt':now,'workerPidHistory':hist,'rollbackArchive':archive,'previousReceipt':oldp,'settingsPreserved':True,'cooldownPreserved':True,'recovery':{'status':'queue-drained-at-boundary','queueDepthAtShutdown':0,'boundary':boundary},'verification':{'at':now,'health':json.loads(health) if health.strip().startswith('{') else health[:300],'captureVerified':False,'note':'capture/retrieval verified by the follow-up session, see HAR-1103'},'upstreamBase':'v13.32.0','carriedUpstreamPRs':[4554,4555,4556,4557]}
+rec={'schemaVersion':1,'version':ver,'commit':commit,'workerSha256':wsha,'installationRoots':{'claude':croot,'codex':xroot,'marketplace':mroot},'knownMarketplacesPath':known,'sourceRoot':src,'contextGeneratorSha256':csha,'activatedAt':now,'weeklyPauseThreshold':0.95,'weeklyPauseThresholdSource':'settings.json CLAUDE_MEM_QUOTA_THRESHOLD_SEVEN_DAY','workerPid':int(pid),'previousWorkerPid':int(oldpid),'workerPidObservedAt':now,'workerPidHistory':hist,'rollbackArchive':archive,'previousReceipt':oldp,'settingsPreserved':True,'cooldownPreserved':True,'recovery':{'status':('transcripts-archived-queue-not-drained' if qd else 'queue-drained-at-boundary'),'queueDepthAtShutdown':qd,'boundary':boundary,'transcriptArchive':archive+'/transcripts'},'verification':{'at':now,'health':json.loads(health) if health.strip().startswith('{') else health[:300],'captureVerified':False,'note':'capture/retrieval verified by the follow-up session, see HAR-1103'},'upstreamBase':'v13.32.0','carriedUpstreamPRs':[4554,4555,4556,4557]}
 if not xroot: rec['installationRoots']['codex']=old['installationRoots']['codex']
 json.dump(rec,open(p+'.tmp','w'),indent=1); import os; os.replace(p+'.tmp',p); print('receipt written')
 PY
@@ -267,8 +287,8 @@ import json,sys,datetime
 p=sys.argv[1]; d=json.load(open(p)); d.update({'status':'activated','activatedAt':datetime.datetime.utcnow().isoformat()+'Z','newWorkerPid':sys.argv[2],'newClaudeRoot':sys.argv[3],'newCodexRoot':sys.argv[4] or None,'auditExit':int(sys.argv[5])}); json.dump(d,open(p,'w'),indent=1)
 PY
 { printf '## %s — 13.32.1-local.1 activated (HAR-1103, unattended window)\n\n' "$(TZ=Asia/Kolkata date +'%Y-%m-%d %H:%M IST')"
-  printf 'Worker API shutdown of PID %s at %s with queueDepth 0; new worker PID %s started from `%s`, health version %s. origin/local/stable moved from %s to %s (old tip tagged `%s`); marketplace checkout and host checkout reset to the same commit; receipt rewritten; audit exit %s. Settings: `%s=%s` added, provider unchanged. Archive: `%s` (SQLite VACUUM INTO snapshot quick_check ok, registries, settings, marketplace working files, old root manifests). Codex root: %s. Capture/retrieval verification follows in the next session and is recorded on HAR-1103.\n\n---\n\n' \
-    "$OLD_PID" "$boundary" "$NEW_WORKER_PID" "$NEW_CLAUDE_ROOT" "$VERSION" "${OLD_REMOTE_TIP:0:9}" "${CAND_TIP:0:9}" "$OLD_TAG" "$arc" "$THRESHOLD_KEY" "$THRESHOLD_VALUE" "$ARCHIVE" "${NEW_CODEX_ROOT:-NOT reinstalled, manual codex plugin add needed}"
+  printf 'Worker API shutdown of PID %s at %s with queueDepth %s (transcripts of the pending interval archived); new worker PID %s started from `%s`, health version %s. origin/local/stable moved from %s to %s (old tip tagged `%s`); marketplace checkout and host checkout reset to the same commit; receipt rewritten; audit exit %s. Settings: `%s=%s` added, provider unchanged. Archive: `%s` (SQLite VACUUM INTO snapshot quick_check ok, registries, settings, marketplace working files, old root manifests). Codex root: %s. Capture/retrieval verification follows in the next session and is recorded on HAR-1103.\n\n---\n\n' \
+    "$OLD_PID" "$boundary" "${q:-0}" "$NEW_WORKER_PID" "$NEW_CLAUDE_ROOT" "$VERSION" "${OLD_REMOTE_TIP:0:9}" "${CAND_TIP:0:9}" "$OLD_TAG" "$arc" "$THRESHOLD_KEY" "$THRESHOLD_VALUE" "$ARCHIVE" "${NEW_CODEX_ROOT:-NOT reinstalled, manual codex plugin add needed}"
   cat "$PROVIDER_STATE"; } > "$PROVIDER_STATE.tmp.$$" && mv "$PROVIDER_STATE.tmp.$$" "$PROVIDER_STATE"
 step "DONE version=$VERSION pid=$NEW_WORKER_PID audit=$arc archive=$ARCHIVE log=$LOG"
 exit "$arc"
