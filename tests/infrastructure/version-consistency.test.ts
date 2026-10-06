@@ -3,6 +3,10 @@ import { readFileSync, existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+// Full semver (semver.org 2.0.0): the local release is a prerelease of the next
+// patch, e.g. 13.32.1-local.1, which outranks upstream 13.32.0 in the plugin cache.
+const SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '../..');
 
@@ -15,7 +19,7 @@ describe('Version Consistency', () => {
     
     const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
     expect(packageJson.version).toBeDefined();
-    expect(packageJson.version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(packageJson.version).toMatch(SEMVER_PATTERN);
     
     rootVersion = packageJson.version;
   });
@@ -84,9 +88,11 @@ describe('Version Consistency', () => {
   }
 
   it('should validate version format is semver compliant', () => {
-    expect(rootVersion).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(rootVersion).toMatch(SEMVER_PATTERN);
     
-    const [major, minor, patch] = rootVersion.split('.').map(Number);
+    // Core triple from the semver match: a prerelease suffix would make split('.') read NaN.
+    const core = SEMVER_PATTERN.exec(rootVersion)!;
+    const [major, minor, patch] = [core[1], core[2], core[3]].map(Number);
     expect(major).toBeGreaterThanOrEqual(0);
     expect(minor).toBeGreaterThanOrEqual(0);
     expect(patch).toBeGreaterThanOrEqual(0);
