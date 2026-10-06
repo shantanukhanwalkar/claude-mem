@@ -671,6 +671,53 @@ describe('shouldAbortForQuota — configurable thresholds', () => {
   });
 });
 
+// The local 95% weekly reserve (HAR-1103). Upstream ships the seven-day
+// threshold at 0.93 (#4396); the host's settings.json carries 0.95 (see
+// docs/local-stable-runbook.md), read through the same settings path as every
+// other threshold. These pin that the setting, not a source constant, moves
+// the pause point, and what the pause says when it fires.
+describe('shouldAbortForQuota — the host weekly reserve threshold', () => {
+  const cliAuth = 'Claude Code OAuth token (read from system keychain at spawn)';
+  const KEY = 'CLAUDE_MEM_QUOTA_THRESHOLD_SEVEN_DAY';
+  let savedThreshold: string | undefined;
+  let store: RateLimitStore;
+  beforeEach(() => {
+    savedThreshold = process.env[KEY];
+    process.env[KEY] = '0.95';
+    store = freshStore();
+  });
+  afterEach(() => {
+    if (savedThreshold === undefined) delete process.env[KEY];
+    else process.env[KEY] = savedThreshold;
+  });
+
+  it.each([0.93, 0.94, 0.9499])('continues weekly capture at utilization %s below the 95% reserve threshold', utilization => {
+    store.set({ rateLimitType: 'seven_day', utilization, status: 'allowed_warning' });
+    expect(shouldAbortForQuota(cliAuth, store, FIXED_NOW).abort).toBe(false);
+  });
+
+  it.each([0.95, 0.96])('pauses weekly capture at utilization %s and preserves the local guard explanation', utilization => {
+    store.set({ rateLimitType: 'seven_day', utilization });
+    const decision = shouldAbortForQuota(cliAuth, store, FIXED_NOW);
+    expect(decision.abort).toBe(true);
+    expect(decision.pause?.kind).toBe('quota_guard');
+    expect(decision.pause?.message).toContain(`${(utilization * 100).toFixed(1)}%`);
+    expect(decision.pause?.message).toContain('95% pause threshold');
+    expect(decision.pause?.message).toContain('weekly Claude usage');
+    expect(decision.pause?.message).not.toContain('exhausted');
+  });
+
+  it('is the setting, not the source: without it the shipped default pauses at 0.94', () => {
+    // The control for the block: if the source carried 0.95 these would pass
+    // with the setting absent, and the runbook note would be dead weight.
+    delete process.env[KEY];
+    store.set({ rateLimitType: 'seven_day', utilization: 0.94, status: 'allowed_warning' });
+    const decision = shouldAbortForQuota(cliAuth, store, FIXED_NOW);
+    expect(decision.abort).toBe(true);
+    expect(decision.pause?.message).toContain('93% pause threshold');
+  });
+});
+
 // The generator's exit path sees only `quota:<window>` on the abort reason and
 // rebuilds the pause from the snapshot, so the ledger and the cooldown notice
 // carry the guard's own words instead of a generic "allowance exhausted".
