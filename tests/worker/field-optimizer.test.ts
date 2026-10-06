@@ -128,6 +128,19 @@ describe('oversized observation fields are condensed, not cut (#3800)', () => {
     expect(String(out.toolOutput)).toContain('condensed output');
   });
 
+  it('returns both payload fields by identity, without a model call, when both already fit', async () => {
+    let calls = 0;
+    const compress: FieldCompressor = async () => { calls++; return ok('nope'); };
+    const toolInput = { command: 'pwd' };
+    const toolOutput = { output: '/repo' };
+
+    const out = await optimizeObservationFields({ toolInput, toolOutput }, compress, { sessionDbId: 1, toolName: 'Bash' }, MAX);
+
+    expect(out.toolInput).toBe(toolInput);
+    expect(out.toolOutput).toBe(toolOutput);
+    expect(calls).toBe(0);
+  });
+
   it('only condenses the field that is actually oversized', async () => {
     const compress: FieldCompressor = async () => ok('condensed');
     const small = { ok: 1 };
