@@ -115,7 +115,7 @@ else
 fi
 
 # 9. Backup directory writable with headroom for the SQLite snapshot and the three roots.
-db_bytes=$(stat -c %s "$HOME/.claude-mem/claude-mem.sqlite3" 2>/dev/null || echo 0)
+db_bytes=$(stat -c %s "$HOME/.claude-mem/claude-mem.db" 2>/dev/null || echo 0)
 roots_bytes=$(json "$RECEIPT" "0" ); roots_bytes=0
 for r in $(json "$RECEIPT" "' '.join(d['installationRoots'].values())"); do roots_bytes=$((roots_bytes + $(du -sb "$r" 2>/dev/null | cut -f1 || echo 0))); done
 need=$(( (db_bytes + roots_bytes) * 2 / 1024 ))
