@@ -1,4 +1,7 @@
 
+import { createHash } from 'node:crypto';
+import { ModeManager } from '../../domain/ModeManager.js';
+import { deriveDocumentEvidence } from '../document-evidence.js';
 import { logger } from '../../../utils/logger.js';
 import { hasStorableTitle } from '../../sqlite/observations/store.js';
 import { parseAgentXml, type ParsedObservation, type ParsedSummary } from '../../../sdk/parser.js';
@@ -425,7 +428,10 @@ export async function processAgentResponse(
       isAuthFailureObserverOutput(text) ||
       isTransportFailureObserverOutput(text));
 
-  if (text && !isRejectionProse) {
+  // Keep the exact slot this invocation appended: another identical reply in
+  // earlier, verified history must never be rewritten.
+  const assistantHistoryIndex = text && !isRejectionProse ? session.conversationHistory.length : -1;
+  if (assistantHistoryIndex >= 0) {
     session.conversationHistory.push({ role: 'assistant', content: text });
   }
 
@@ -627,8 +633,41 @@ export async function processAgentResponse(
 
   const { observations, summary } = parsed;
   const claimedMessages = sessionManager.getClaimedMessages(session.sessionDbId);
+  // The queue retains the original capture-sanitized payload. Field optimization
+  // only builds a separate prompt view, so its model-written condensation is
+  // never evidence for this deterministic transformation.
+  const evidence = session.lastGeneratorSource === 'ingest'
+    && observations.length > 0 && summary === null
+    // The parser selects the first root, so a later summary is not reflected
+    // in parsed.summary. Such mixed replies retain their existing behavior.
+    && !/<summary\b/i.test(text)
+    && ModeManager.getInstance().getActiveModeId?.() === 'code'
+    ? deriveDocumentEvidence(claimedMessages)
+    : null;
+  const transformed = evidence?.kind === 'eligible' ? evidence : null;
   const fileEvidence = extractObservationFileEvidence(claimedMessages);
-  const sanitizedObservations = sanitizeObservationFiles(observations, fileEvidence);
+  const sanitizedObservations = transformed
+    ? [{
+      ...transformed.observation,
+      // Store provenance, not a second copy of the raw payload or rejected reply.
+      metadata: JSON.stringify({ documentEvidence: {
+        ...transformed.provenance,
+        originalReplyHash: createHash('sha256').update(text).digest('hex'),
+        observerModel: modelId ?? null,
+      } }),
+    }]
+    : sanitizeObservationFiles(observations, fileEvidence);
+  if (transformed) {
+    if (assistantHistoryIndex >= 0) {
+      session.conversationHistory[assistantHistoryIndex] = {
+        role: 'assistant', content: sanitizedObservations.map(renderObservationXml).join('\n'),
+      };
+    }
+    // The SDK holds a separate opaque history. Fence its input immediately,
+    // including storage/ACK failure paths; after a successful ACK, the provider
+    // reads the current result's real usage and retires before releasing input.
+    if (agentName === 'SDK') session.retireObserverContextAfterResult = true;
+  }
   // Include claimed-message file evidence even for summary-only responses
   // (no parsed observations), otherwise files_read/files_edited persist as [].
   const summaryForStore = attachObservationFilesToSummary(
@@ -701,7 +740,7 @@ export async function processAgentResponse(
   session.earliestPendingTimestamp = null;
   worker?.broadcastProcessingStatus?.();
 
-  if (parsed.schemaDrift) {
+  if (parsed.schemaDrift && !transformed) {
     correctSchemaDrift(session, text, labeledObservations, parsed.schemaDrift, agentName);
   } else {
     session.consecutiveSchemaDrifts = 0;

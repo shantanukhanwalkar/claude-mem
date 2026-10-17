@@ -772,7 +772,7 @@ export class SessionManager {
    *    the sweep repeated every cooldown, forever.
    */
   getResumableSessionIds(includeOperatorOnly: boolean = false): number[] {
-    const automaticallyRetryable = new Set([null, undefined, 'quota', 'rate_limit', 'overflow', 'provider_switch', 'response_stall']);
+    const automaticallyRetryable = new Set([null, undefined, 'quota', 'rate_limit', 'overflow', 'provider_switch', 'response_stall', 'context_retired']);
     const memoryOnCmemGateway = !includeOperatorOnly && canCmemGatewayServe();
     return Array.from(this.sessions.values())
       .filter(session => !session.generatorPromise

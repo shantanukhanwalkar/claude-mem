@@ -428,9 +428,8 @@ export function renderObservationPrompt(parts: ObservationPromptParts): string {
 
 If a <parameters> or <outcome> block above contains an "<elided chars=... />" marker, that field was truncated to fit the observer's context window. Describe only what you can see in the kept portion and do not infer details about the elided range.
 ${redactionHint}
-Ground the title, facts, and narrative in observed tool outcomes. Requests, plans, and readbacks of existing state do not prove that an action was completed.
-Claim a completed action only when the current tool outcome confirms it; earlier verified work may supply background, but must not be presented as newly completed. Linking or reading an existing issue does not prove that it was created.
-Durable discoveries from readbacks remain valid observations.
+Successful edit-only evidence: notes.md adds "deployment passed". Source per field: title "Notes updated with reported deployment", subtitle/fact "Notes report deployment passed", narrative "The edit succeeded; deployment is only reported, not independently shown here."
+Only current tool proof supports NEWLY completed actions; requests/plans/readbacks do not, and linking is not creation. Prior verified work is background; readback discoveries remain valid.
 files_read/files_modified require tool evidence of reads/changes; omit merely mentioned or planned paths.
 Return either one or more <observation>...</observation> blocks, or <skip_summary reason="noise" /> if this tool use should be skipped.
 Concrete debugging findings from logs, queue state, database rows, session routing, or code-path inspection count as durable discoveries and should be recorded.

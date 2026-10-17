@@ -470,6 +470,14 @@ export async function startGeneratorWithProvider(
         resumeGeneratorLater(session, 0, 'schema-drift', ensureGeneratorRunning);
       }
 
+      // A document-evidence transformation retired an SDK conversation after
+      // storing and confirming its event. Resume only remaining work; an empty
+      // buffer waits for the next ingest and cannot form an idle restart loop.
+      if (normalizedReason === 'context_retired'
+        && sessionManager.getMessageBuffer().getPendingCount(session.sessionDbId) > 0) {
+        resumeGeneratorLater(session, 0, 'document-evidence', ensureGeneratorRunning);
+      }
+
       // A response stall preserved its claimed batch but, like a recycle, has
       // no later ingest guaranteed to pick it up. Resume after a delay, a
       // bounded number of times in a row; an answered queued-work turn resets
