@@ -1,6 +1,6 @@
 # HAR-947: Sonnet 5.5 qualification
 
-Status: source compatibility and two isolated SDK qualification calls complete; independent review, workload evaluation, release versioning, installation, and live capture verification remain separate gates. This document does not attest that a release was installed.
+Status: the compatibility and Chroma source changes passed independent review. Release candidate `13.32.1-local.2` also clarifies shared observation grounding after a diagnostic reproduced an unsupported completion claim on both model generations. Targeted grounding regressions and independent source review passed; the complete-source workload evaluation, installation, and live capture verification remain separate gates. This document does not attest that a release was installed.
 
 ## Official compatibility facts checked 2026-10-18
 
@@ -12,7 +12,7 @@ Claude Code requires version 2.1.284 or later for Sonnet 5.5 and defaults its ef
 
 ## Maintained implementation
 
-Qualification starts from `local/stable` commit `b90bbbfb0fba798095b3561efe0a7c636b2a4391`, version `13.32.1-local.1`, upstream baseline v13.32.0. The installed SDK is `@anthropic-ai/claude-agent-sdk` 0.3.252 (declared range `^0.3.172`), whose public `Options` supports `thinking` and `effort`, but not `between_tools`. Do not cast unsupported API fields into this SDK.
+Qualification starts from `local/stable` commit `b90bbbfb0fba798095b3561efe0a7c636b2a4391`, version `13.32.1-local.1`, upstream baseline v13.32.0. Initial isolated qualification used the available `@anthropic-ai/claude-agent-sdk` 0.3.252. Inspection of the deployed baseline bundle then identified SDK 0.3.291 and its preserved October 6 build dependency tree. The release candidate pins 0.3.291 exactly, replacing the baseline range `^0.3.172`, and rebuilds from that original tree to avoid incidental library downgrades. Both SDK versions expose `thinking` and `effort`, but not `between_tools`; release checks exercise the 0.3.291 serialization path. Do not cast unsupported API fields into this SDK.
 
 `buildHardenedSdkOptions` gives Observer calls with the explicit model ID `claude-sonnet-5-5` adaptive thinking and medium effort. Other model IDs retain disabled thinking without effort; KnowledgeAgent retains its existing behavior. Use the explicit pin: the moving `sonnet` alias does not select this policy. Tier aliases already resolve before the helper and need no special migration rewrite.
 
@@ -35,6 +35,14 @@ Private evidence: `~/.local/state/claude-mem-maintenance/har947-compat/{baseline
 The independent retrieval preflight found MCP 1.6.0 importing the private Pydantic `eval_type_backport` symbol removed in the resolved Pydantic 2.14.1 environment. Adding `pydantic==2.12.5` to the existing uvx dependency overrides restores the locally qualified combination. The existing `chroma-mcp==0.2.6`, `chromadb==1.5.9`, onnxruntime floor, and protobuf cap remain unchanged. The shared override list applies to both persistent and HTTP launch modes and is recorded in crash/store provenance.
 
 An isolated temporary store passed MCP initialization, 13-tool discovery, collection creation, add, get, and query with that exact launcher pin. The production database was not opened. Private evidence is `~/.local/state/claude-mem-maintenance/har947-chroma-proof/protocol-and-retrieval.json` and `proof-summary.json`. This does not prove live retrieval recovery; install the reviewed bundle and verify it after restart.
+
+## Shared grounding diagnostic
+
+A fresh replay of a link-and-readback operation produced an unsupported "Created" claim on both Sonnet 4.5 and Sonnet 5.5. The operation linked an existing issue and read its state; it did not create that issue. In the original chronological session an earlier tool did create it, so this isolated failure does not by itself prove a false production completion. A two-turn replay with that earlier creation changed the result: Sonnet 5.5 described the linking delta correctly, while Sonnet 4.5 anticipated links in its creation observation and skipped the later delta. This is a shared grounding ambiguity, not an established Sonnet 5.5-specific regression.
+
+The shared observation prompt now requires titles, facts, and narratives to distinguish current confirmed actions from requests, plans, and existing-state readbacks. Earlier verified work may supply background without being claimed as newly completed. Readbacks can still support durable discoveries. File metadata requires tool evidence of actual reads or changes, rather than paths merely mentioned in an issue or plan. The original failed live fixtures supply the behavioral regression cases; existing prompt tests check the surrounding rendering and skip contracts. Independent review approved the clarification. A bounded fresh replay of the original link/readback case with the final prompt, exact deployed SDK 0.3.291 and CLI 2.1.302 passed on both model generations: actual response models were `claude-sonnet-4-5-20250929` and `claude-sonnet-5-5`, terminal results succeeded, neither claimed issue creation, and both left file lists empty. This targeted regression does not replace the complete-source workload quality gate before model activation.
+
+Private evidence: `~/.local/state/claude-mem-maintenance/har947-evaluation-20261018/diagnostic-{baseline,candidate}-{fresh-repeat,context}.json`, `diagnostic-protocol.json`, and `exact-runtime-regression-{baseline,candidate}.json`. The initial mixed-snapshot full test run was interrupted without a terminal summary. Eight of its ten observed failures reproduce on unchanged base; two full-suite-order/timing failures remain unattributed. No full-suite pass is claimed.
 
 ## Release and installation requirements
 
