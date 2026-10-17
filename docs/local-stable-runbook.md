@@ -1,8 +1,8 @@
 # Maintained local claude-mem — HAR-977
 
-Baseline: upstream v13.24.1. Local release: 13.24.2-local.2. Runtime provider: Claude CLI/OAuth, Sonnet 4.5. Both Claude and Codex feed one shared worker on 127.0.0.1:37777. This background inference uses the Claude subscription, including when the foreground client is Codex.
+Baseline: upstream v13.32.0. Maintained source release at the HAR-947 qualification baseline: 13.32.1-local.1, commit b90bbbfb0. Runtime provider: Claude CLI/OAuth; the pre-migration observer uses pinned Sonnet 4.5. Both Claude and Codex feed one shared worker on 127.0.0.1:37777. This background inference uses the Claude subscription, including when the foreground client is Codex. The `13.32.1-local.2` candidate adds compatibility, shared grounding clarification, and a Chroma launcher repair; its presence in source does not imply installation or Sonnet 5.5 activation. The deployment receipt and live health identify the installed release; see [the Sonnet 5.5 qualification](2026-10-18-sonnet55-migration.md) for the proposed model policy and deployment checks.
 
-The local release keeps durable memory-session foreign keys intact across SDK recycle/startup, and preserves work on startup failures. It restores evidence grounding and explicit observation skips, ignores init-only completion claims, removes model-based oversized-field condensation, and refreshes/ expires quota windows. Tool fields retain bounded head/tail excerpts with explicit elision; omitted text must not be inferred. Actual observation/summary inference still costs usage and real provider limits still pause capture.
+The current source carries the init-reply gate, malformed quota-window repair, guard-versus-refusal classification, and SDK stream-exit batch preservation over upstream v13.32.0. The earlier prohibition on model-based oversized-field condensation was not carried into this release. Oversized fields can trigger one bounded condensation call per field through the same hardened Observer helper and selected model; unusable condensation falls back to explicit truncation. Ordinary observations, summaries, and optional Telegram wrap-up formatting also use inference. Real provider limits still pause capture.
 
 ## Installation identity and updates
 
@@ -14,14 +14,16 @@ Adopting upstream is an explicit maintenance task:
 
 1. Create an isolated candidate from local/stable, select a released upstream tag, and reconcile source changes. Rebuild generated files after resolving source conflicts; do not resolve bundle conflicts by blindly choosing upstream bytes.
 2. Run worker, SDK, provider, audit and integration tests; run root/viewer type checks; build. Review grounding, payload bounds, quota freshness and worker resolution together.
-3. Give the local patch a coherent version in package/plugin/marketplace manifests. The hook resolver prefers a normal release over a prerelease at the same numeric version, so the first local patch uses 13.24.2-local.1 to outrank upstream 13.24.1. Codex build metadata is only a reinstall cachebuster.
+3. Give the local patch a coherent version in package/plugin/marketplace manifests. The hook resolver prefers a normal release over a prerelease at the same numeric version: 13.32.1-local.1 outranks upstream 13.32.0, whereas 13.32.0-local.1 does not. A new compatibility release needs its own reviewed version and regenerated artifacts. Codex build metadata is only a reinstall cachebuster.
 4. Back up installation metadata/settings and the current receipt; use SQLite's backup API for a consistent database snapshot if needed. This upstream baseline holds its active observation queue in RAM: the legacy SQLite pending_messages table is not that queue. Normally wait for /api/processing-status queueDepth=0 before restarting. If a broken worker cannot drain, first preserve the original Claude/Codex transcripts and identify the pending interval for controlled recovery. A SQLite backup alone does not preserve in-flight work. Preserve quota cooldowns.
 5. Install the reviewed build to the marketplace and Claude cache, reinstall Codex from its confirmed local marketplace, and ensure automatic upstream updates remain disabled. Check every installed worker hash and manifest before restart.
-6. Restart through the worker API. Verify the new PID/version/readiness, successful post-deployment observation capture and retrieval, and no new condensation calls. Only then replace the deployment receipt and update HAR-977/provider records.
+6. Restart through the worker API. Verify the new PID/version/readiness, successful post-deployment observation capture and retrieval, and condensation only when a field exceeds its budget. Verify the served model from an assistant frame, rather than only the settings or database tag. Only then replace the deployment receipt and update HAR-977/HAR-947/provider records.
 
 ## Settings the install must carry
 
 Upstream made the quota guard's per-window thresholds settings (#4396) and ships `CLAUDE_MEM_QUOTA_THRESHOLD_SEVEN_DAY` at `0.93`. The local contract is a 95% weekly reserve, so the host's `~/.claude-mem/settings.json` must set `CLAUDE_MEM_QUOTA_THRESHOLD_SEVEN_DAY=0.95` at install time, as a string or a JSON number. The source no longer overrides the default: it is configuration, read on every guard decision, and a fresh install or a settings reset silently drops back to 93%. Verify with `shouldAbortForQuota` on a 94% weekly reading (it must continue) and check the setting after every deployment, next to the receipt audit.
+
+Preserve stricter model-specific windows too: the Sonnet weekly threshold is currently `0.92`. Preserve persisted cooldowns, queue limits, and conversation/field budgets during a model migration. The source's Claude budget remains 200,000 tokens unless explicitly overridden or selected with `[1m]`; Sonnet 5.5's advertised larger window does not authorize widening it.
 
 ## Rollback
 
