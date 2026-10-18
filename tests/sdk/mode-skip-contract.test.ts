@@ -24,6 +24,24 @@ describe('every mode states the skip contract (#3624)', () => {
     expect(modeIds.length).toBeGreaterThan(30);
   });
 
+  it('code and its locale descendants preserve useful failed research and skip actual noise', () => {
+    // Chill has its own selective recording/skip policy, outside this contract.
+    const codeModes = modeIds.filter(id => id === 'code' || (id.startsWith('code--') && id !== 'code--chill'));
+    expect(codeModes).toContain('code--fr');
+    for (const modeId of codeModes) {
+      const { recording_focus, skip_guidance, field_guidance } = ModeManager.getInstance().loadMode(modeId).prompts;
+      expect(recording_focus).toContain('Concrete debugging or investigative findings');
+      expect(skip_guidance).toContain('File research with no new durable finding');
+      expect(skip_guidance).toContain('failed diagnostic command is not automatically noise');
+      expect(skip_guidance).toContain('only when new and useful');
+      expect(skip_guidance).toContain('skip all later re-confirmations of the identical fact');
+      expect(skip_guidance).toContain('Simple file listings with no follow-on finding');
+      expect(skip_guidance).toContain('<skip_summary reason="noise" />');
+      expect(skip_guidance).not.toContain('File related research that comes back empty or not found');
+      expect(field_guidance).toContain('paths and read/modified roles supported by the supplied tool evidence');
+    }
+  });
+
   for (const modeId of modeIds) {
     it(`${modeId} asks for <skip_summary />, never an empty reply`, () => {
       const guidance = ModeManager.getInstance().loadMode(modeId).prompts.skip_guidance;

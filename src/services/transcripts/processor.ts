@@ -474,16 +474,8 @@ export class TranscriptEventProcessor {
     const toolInput = this.maybeParseJson(fields.toolInput);
     const toolResponse = this.maybeParseJson(fields.toolResponse);
 
-    if (toolName === 'apply_patch' && typeof toolInput === 'string') {
-      const files = this.parseApplyPatchFiles(toolInput);
-      for (const filePath of files) {
-        await this.sendFileEdit(session, {
-          filePath,
-          edits: [{ type: 'apply_patch', patch: toolInput }]
-        });
-      }
-    }
-
+    // A patch request is not a completed editor event. Wait for its paired
+    // tool_result instead of synthesizing write_file { success: true } here.
     if (toolName && toolResponse !== undefined) {
       await this.sendObservation(session, watch, {
         toolName,
@@ -630,27 +622,6 @@ export class TranscriptEventProcessor {
       }, error instanceof Error ? error : undefined);
       return value;
     }
-  }
-
-  private parseApplyPatchFiles(patch: string): string[] {
-    const files: string[] = [];
-    const lines = patch.split('\n');
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('*** Update File: ')) {
-        files.push(trimmed.replace('*** Update File: ', '').trim());
-      } else if (trimmed.startsWith('*** Add File: ')) {
-        files.push(trimmed.replace('*** Add File: ', '').trim());
-      } else if (trimmed.startsWith('*** Delete File: ')) {
-        files.push(trimmed.replace('*** Delete File: ', '').trim());
-      } else if (trimmed.startsWith('*** Move to: ')) {
-        files.push(trimmed.replace('*** Move to: ', '').trim());
-      } else if (trimmed.startsWith('+++ ')) {
-        const path = trimmed.replace('+++ ', '').replace(/^b\//, '').trim();
-        if (path && path !== '/dev/null') files.push(path);
-      }
-    }
-    return Array.from(new Set(files));
   }
 
   private async handleSessionEnd(session: SessionState, watch: WatchTarget): Promise<void> {

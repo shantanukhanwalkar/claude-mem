@@ -33,7 +33,7 @@ import type { WorkerRef, StorageResult } from './types.js';
 import { broadcastObservation, broadcastSummary } from './ObservationBroadcaster.js';
 import { telemetryBuffer } from '../../telemetry/buffer.js';
 
-type ObservationFileEvidenceMessage = Pick<PendingMessage, 'type' | 'tool_name' | 'tool_input'>;
+type ObservationFileEvidenceMessage = Pick<PendingMessage, 'type' | 'tool_name' | 'tool_input' | 'tool_response'>;
 
 export interface ObservationFileEvidence {
   files_read: string[];
@@ -43,6 +43,38 @@ export interface ObservationFileEvidence {
 const READ_TOOL_NAMES = new Set(['Read']);
 const WRITE_TOOL_NAMES = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'write_file']);
 const PATCH_TOOL_NAMES = new Set(['apply_patch']);
+
+/** Decode the single JSON layer added by ingest; never inspect file content recursively. */
+function decodeFileEvidenceCapture(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch { return value; }
+}
+
+function hasExplicitNativeFileFailure(toolName: string, outcome: unknown): boolean {
+  if (outcome && typeof outcome === 'object' && !Array.isArray(outcome)) {
+    const record = outcome as Record<string, unknown>;
+    // claudeCodeAdapter's PostToolUseFailure envelope, including interruption
+    // without error text. A nested error in a successful Read is just content.
+    if (typeof record.is_interrupt === 'boolean'
+      && Object.keys(record).every(key => key === 'error' || key === 'is_interrupt')
+      && (record.is_interrupt || typeof record.error === 'string')) return true;
+  }
+  // The same full native receipt envelope accepted by document-evidence.ts,
+  // but with a failed exit. Do not infer failure from arbitrary error prose.
+  return toolName === 'apply_patch' && typeof outcome === 'string'
+    && /^Exit code: [1-9]\d*\n(?:Wall time: (?:0|[1-9]\d{0,8})(?:\.\d{1,9})? seconds\n)?Output:\n[\s\S]*$/.test(outcome);
+}
+
+function confirmedSerializedPatchPaths(patch: string, outcome: unknown): string[] {
+  if (typeof outcome !== 'string') return [];
+  const envelope = /^Exit code: 0\n(?:Wall time: (?:0|[1-9]\d{0,8})(?:\.\d{1,9})? seconds\n)?Output:\n([\s\S]*)$/.exec(outcome);
+  const lines = (envelope ? envelope[1] : outcome).replace(/\n$/, '').split('\n');
+  if (lines.shift() !== 'Success. Updated the following files:') return [];
+  const reportedPaths = lines.map(line => /^[AMD] (.+)$/.exec(line)?.[1]);
+  if (!reportedPaths.length || reportedPaths.some(path => path === undefined)) return [];
+  const paths = parsePatchFiles(patch);
+  return paths.length === reportedPaths.length && paths.every(path => reportedPaths.includes(path)) ? paths : [];
+}
 
 export function extractObservationFileEvidence(messages: ReadonlyArray<ObservationFileEvidenceMessage>): ObservationFileEvidence {
   const filesRead: string[] = [];
@@ -59,6 +91,8 @@ export function extractObservationFileEvidence(messages: ReadonlyArray<Observati
     if (!toolName) {
       continue;
     }
+    const outcome = decodeFileEvidenceCapture(message.tool_response);
+    if (hasExplicitNativeFileFailure(toolName, outcome)) continue;
 
     if (READ_TOOL_NAMES.has(toolName)) {
       for (const filePath of extractPathsFromToolInput(message.tool_input, 'read')) {
@@ -73,7 +107,14 @@ export function extractObservationFileEvidence(messages: ReadonlyArray<Observati
     }
 
     if (PATCH_TOOL_NAMES.has(toolName)) {
-      for (const filePath of extractPatchPaths(message.tool_input)) {
+      const decodedInput = decodeFileEvidenceCapture(message.tool_input);
+      // Transcript patch strings were formerly represented by a premature
+      // synthetic write_file event. Recover them only from a matching success
+      // receipt; unwrapping unknown outcomes would newly promote intent.
+      const paths = typeof decodedInput === 'string' && decodedInput !== message.tool_input
+        ? confirmedSerializedPatchPaths(decodedInput, outcome)
+        : extractPatchPaths(message.tool_input);
+      for (const filePath of paths) {
         pushUnique(seenModified, filesModified, filePath);
       }
     }

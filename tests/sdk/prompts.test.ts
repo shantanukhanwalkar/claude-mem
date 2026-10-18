@@ -1,6 +1,10 @@
 import { describe, expect, it, spyOn } from 'bun:test';
+import { readFileSync } from 'node:fs';
 
-import { buildObservationPrompt, buildSummaryPrompt, stripImagePayloadsFromField } from '../../src/sdk/prompts.js';
+import { buildContinuationPrompt, buildInitPrompt, buildObservationPrompt, buildSummaryPrompt, splitFramingPrompt, stripImagePayloadsFromField } from '../../src/sdk/prompts.js';
+import type { ModeConfig } from '../../src/services/domain/types.js';
+
+const codeMode = JSON.parse(readFileSync(new URL('../../plugin/modes/code.json', import.meta.url), 'utf8')) as ModeConfig;
 
 const summaryMode = {
   prompts: {
@@ -17,6 +21,50 @@ const summaryMode = {
     summary_footer: 'summary footer',
   },
 } as any;
+
+// Emitted instruction contracts only: no model compliance is inferred.
+for (const generation of ['init', 'continuation'] as const) {
+  describe(`code evidence contract in rendered ${generation} instructions`, () => {
+    const request = 'Record a useful proposal edit and the reported limitation.';
+    const prompt = generation === 'init'
+      ? buildInitPrompt('sample-project', 'sample-session', request, codeMode)
+      : buildContinuationPrompt(request, 2, 'sample-session', codeMode);
+    const { instructions, userRequest } = splitFramingPrompt(prompt);
+
+    it('records useful completed artifacts while attributing their unexecuted contents', () => {
+      expect(userRequest).toContain(request);
+      expect(instructions).toContain('document/artifact changes: record new, useful changes actually completed');
+      expect(instructions).toContain('even when proposed actions in the content remain unapproved or unexecuted');
+      expect(instructions).toContain('attribute comment/document intent and reported claims');
+      expect(instructions).toContain('do not record it again - skip it');
+    });
+
+    it('separates source mechanisms and probe scope from evidenced broader outcomes', () => {
+      expect(instructions).toContain('Describe the mechanism or content change shown');
+      expect(instructions).toContain('Source contents or names do not by themselves prove deployment or running state');
+      expect(instructions).toContain('Limit probe conclusions to the checked path, process, or returned result; broader conclusions need supporting evidence');
+      expect(instructions).toContain('only for the outcome the supplied evidence establishes');
+      expect(instructions).toContain('"Deployment configuration defines canary releases with auto-rollback"');
+    });
+
+    it('retains guards, exact source values and nonnumeric repetition when no total is supplied', () => {
+      expect(instructions).toContain('Retain meaningful guards/assertions, limitations and errors');
+      expect(instructions).toContain('preserve supplied quantities, identifiers and quoted values, including qualifiers');
+      expect(instructions).toContain('Do not infer or estimate repetition totals from repeated text');
+      expect(instructions).toContain('without an explicit source total, describe repetition without a number');
+    });
+
+    it('requests supported file entries without guessed expansions or a completeness promise', () => {
+      expect(instructions).toContain('paths and read/modified roles supported by the supplied tool evidence');
+      expect(instructions).toContain('Do not guess environment-variable expansions from the working directory or a user name');
+      expect(instructions).toContain('Leave unresolved paths out of file lists');
+      expect(instructions).toContain('describe useful symbolic operations or path uncertainty honestly in facts/narrative');
+      expect(instructions).toContain('not a complete inventory');
+      expect(instructions).toContain('<files_read>');
+      expect(instructions).toContain('<files_modified>');
+    });
+  });
+}
 
 describe('buildObservationPrompt', () => {
   // These check the emitted prompt contract, not the model's attribution behavior.
