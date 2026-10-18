@@ -19,6 +19,53 @@ const summaryMode = {
 } as any;
 
 describe('buildObservationPrompt', () => {
+  // These check the emitted prompt contract, not the model's attribution behavior.
+  // A fresh paired model qualification is still required.
+  it('distinguishes readback assertions from confirmed tool results and metadata', () => {
+    const prompt = buildObservationPrompt({
+      id: 1,
+      tool_name: 'issue_get',
+      tool_input: JSON.stringify({ key: 'TASK-42' }),
+      tool_output: JSON.stringify({
+        key: 'TASK-42',
+        status: 'Open',
+        title: 'Nightly cleanup',
+        description: 'The cleanup job runs nightly and previously removed old records.',
+      }),
+      created_at_epoch: 0,
+    });
+    const [evidence, instructions] = prompt.split('</observed_from_primary_session>');
+
+    expect(evidence).toContain('"status": "Open"');
+    expect(evidence).toContain('The cleanup job runs nightly and previously removed old records.');
+    expect(instructions).toContain('Attribute assertions in document/issue/readback/report text');
+    expect(instructions).toContain('including ongoing, recurring, historical and background behavior');
+    expect(instructions).toContain('unless current tool evidence verifies them');
+    expect(instructions).toContain('Direct execution/results and returned metadata support only what they actually confirm');
+  });
+
+  for (const restateSchema of [false, true]) {
+    it(`requires narrative attribution to stand alone with schema reminder ${restateSchema}`, () => {
+      const prompt = buildObservationPrompt({
+        id: 2,
+        tool_name: 'Read',
+        tool_input: JSON.stringify({ file: 'operations.md' }),
+        tool_output: JSON.stringify({ content: 'The cleanup job runs nightly.' }),
+        created_at_epoch: 0,
+      }, undefined, restateSchema);
+      const instructions = prompt.split('</observed_from_primary_session>')[1];
+
+      expect(instructions).toContain('Each persisted field must stand alone');
+      expect(instructions).toContain('attribution in facts, another field or a final disclaimer cannot qualify an unqualified narrative clause');
+      expect(instructions).toContain('including relative/background clauses');
+      expect(instructions).toContain('Readback-only example:');
+      expect(instructions).toContain('Narrative: "The issue is Open; its description reports that the job runs nightly."');
+      // Preserve the distinct edit-only example and useful readback discovery contract.
+      expect(instructions).toContain('Successful edit-only evidence: notes.md adds "deployment passed"');
+      expect(instructions).toContain('readback discoveries remain valid');
+    });
+  }
+
   it('instructs the observer to avoid prose skip responses', () => {
     const prompt = buildObservationPrompt({
       id: 1,
@@ -187,7 +234,8 @@ describe('buildObservationPrompt image-payload stripping (#3730)', () => {
 
     // The prompt is appended to session.conversationHistory and re-sent by
     // every later observation in the session, so this saving compounds.
-    expect(prompt.length).toBeLessThan(2_000);
+    // Allow the attribution instructions while still bounding the whole prompt.
+    expect(prompt.length).toBeLessThan(3_000);
   });
 
   it('strips images nested inside arrays and objects', () => {
