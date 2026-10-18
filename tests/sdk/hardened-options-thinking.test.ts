@@ -27,10 +27,10 @@ describe('buildHardenedSdkOptions thinking policy', () => {
     expect('thinkingConfig' in build('Observer')).toBe(false);
   });
 
-  it('uses supported adaptive thinking with explicit medium effort for pinned Sonnet 5.5', () => {
+  it('uses supported adaptive thinking with explicit high effort for pinned Sonnet 5.5', () => {
     const opts = build('Observer', 'claude-sonnet-5-5');
     expect(opts.thinking).toEqual({ type: 'adaptive' });
-    expect(opts.effort).toBe('medium');
+    expect(opts.effort).toBe('high');
     expect('thinkingConfig' in opts).toBe(false);
     expect('maxThinkingTokens' in opts).toBe(false);
   });
@@ -92,7 +92,7 @@ it.skipIf(process.platform === 'win32')('passes Sonnet 5.5 thinking, effort and 
     const argv = readFileSync(argvPath, 'utf8').trimEnd().split('\n');
     expect(argv[argv.indexOf('--model') + 1]).toBe('claude-sonnet-5-5');
     expect(argv[argv.indexOf('--thinking') + 1]).toBe('adaptive');
-    expect(argv[argv.indexOf('--effort') + 1]).toBe('medium');
+    expect(argv[argv.indexOf('--effort') + 1]).toBe('high');
     expect(argv).not.toContain('disabled');
     expect(argv).toContain('--tools=');
     expect(argv[argv.indexOf('--permission-mode') + 1]).toBe('dontAsk');

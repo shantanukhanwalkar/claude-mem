@@ -167,7 +167,7 @@ export function buildHardenedSdkOptions(input: HardenedSdkOptionsInput): Options
     // Preserve older models and KnowledgeAgent's existing thinking policy.
     ...(input.source === 'Observer'
       ? input.model === 'claude-sonnet-5-5'
-        ? { thinking: { type: 'adaptive' as const }, effort: 'medium' as const }
+        ? { thinking: { type: 'adaptive' as const }, effort: 'high' as const }
         : { thinking: { type: 'disabled' as const } }
       : {}),
 

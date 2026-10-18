@@ -10,7 +10,7 @@ mock.module('@anthropic-ai/claude-agent-sdk', () => ({
     calls.push(standalone ? (prompt.startsWith('Condense') ? 'condensation' : 'standalone') : 'observation');
     assert.equal(options.model, 'claude-sonnet-5-5');
     assert.deepEqual(options.thinking, { type: 'adaptive' });
-    assert.equal(options.effort, 'medium');
+    assert.equal(options.effort, 'high');
     assert.equal(options.pathToClaudeCodeExecutable, '/owned/claude');
     assert.deepEqual(options.tools, []);
     assert.deepEqual(options.allowedTools, []);
