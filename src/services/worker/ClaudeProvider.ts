@@ -1,4 +1,4 @@
-
+import { createHash } from 'node:crypto';
 import { DatabaseManager } from './DatabaseManager.js';
 import { SessionManager } from './SessionManager.js';
 import { logger } from '../../utils/logger.js';
@@ -648,7 +648,20 @@ export class ClaudeProvider {
           // so a frame without one keeps the requested model, as the other
           // providers do.
           const reportedModel = message.message.model;
-          const servedModel = typeof reportedModel === 'string' && reportedModel ? reportedModel : modelId;
+          const hasReportedModel = typeof reportedModel === 'string' && reportedModel.length > 0;
+          const servedModel = hasReportedModel ? reportedModel : modelId;
+
+          // Reception evidence only: processing/storage can still fail below.
+          logger.info('SDK', 'Observer model identity', {
+            sessionId: session.sessionDbId,
+            workerPid: process.pid,
+            sessionDbId: session.sessionDbId,
+            responseSha256: createHash('sha256').update(textContent).digest('hex'),
+          }, {
+            requestedModel: modelId,
+            reportedModel: hasReportedModel ? reportedModel : null,
+            requestedFallbackUsed: !hasReportedModel,
+          });
 
           pacer.processingStarted();
           try {

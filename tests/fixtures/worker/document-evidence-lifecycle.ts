@@ -1,10 +1,17 @@
 import { strict as assert } from 'node:assert';
 import { createHash } from 'node:crypto';
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { mock } from 'bun:test';
 import type { DatabaseManager } from '../../../src/services/worker/DatabaseManager.js';
 import type { PendingMessage } from '../../../src/services/worker-types.js';
 
 const kind = process.argv[2];
+const modelEvidence = kind.startsWith('sdk-model-evidence-');
+if (modelEvidence) {
+  assert.ok(process.env.CLAUDE_MEM_DATA_DIR, 'fixture requires an isolated data/log directory before source imports');
+  writeFileSync(join(process.env.CLAUDE_MEM_DATA_DIR!, 'settings.json'), JSON.stringify({ CLAUDE_MEM_LOG_LEVEL: 'INFO' }));
+}
 const competingReason = ({
   'sdk-shutdown': 'shutdown', 'sdk-provider-switch': 'provider_switch',
   'sdk-auth': 'auth:review_boundary', 'sdk-quota': 'quota:review_boundary',
@@ -17,6 +24,7 @@ let generation = 0;
 let contextForFreshGeneration = '';
 const rawReply = '<observation><type>discovery</type><title>Production checks passed</title><facts><fact>Deployment verified and the live worker restarted</fact></facts><narrative>The production system is healthy.</n</narrative><files_read><file>invented-secret.ts</file></files_read><files_modified><file>invented.ts</file></files_modified></observation><observation><type>discovery</type><title>Live implementation complete</title></observation>';
 const summaryReply = '<summary><request>Review stored document evidence</request><completed>Document captured</completed></summary>';
+const replyParts = modelEvidence ? [rawReply, 'Private fixture body 😀\n '] : [rawReply];
 if (kind.startsWith('sdk-')) {
   const actualFind = { ...(await import('../../../src/shared/find-claude-executable.js')) };
   const actualRegistry = { ...(await import('../../../src/supervisor/process-registry.js')) };
@@ -36,8 +44,11 @@ if (kind.startsWith('sdk-')) {
       assert.equal(first.done, false);
       sdkInputs.push({ generation: current, text: first.value.message.content });
       yield { type: 'system', subtype: 'init', session_id: `sdk-generation-${current}` };
-      yield { type: 'assistant', message: { model: 'actual-fixture-model', usage: { input_tokens: 17, output_tokens: 2 },
-        content: [{ type: 'text', text: String(first.value.message.content).includes('MODE SWITCH: PROGRESS SUMMARY') ? summaryReply : rawReply }] } };
+      yield { type: 'assistant', message: {
+        ...(kind === 'sdk-model-evidence-absent' ? {} : { model: 'actual-fixture-model' }),
+        usage: { input_tokens: 17, output_tokens: 2 },
+        content: (String(first.value.message.content).includes('MODE SWITCH: PROGRESS SUMMARY') ? [summaryReply] : replyParts)
+          .map(text => ({ type: 'text', text })) } };
       if (!String(first.value.message.content).includes('MODE SWITCH: PROGRESS SUMMARY')) {
         yield { type: 'assistant', message: { model: 'actual-fixture-model', content: [{ type: 'text',
           text: '<observation><type>discovery</type><title>Late unqualified claim</title></observation>' }] } };
@@ -337,6 +348,34 @@ try {
         assert.equal(sdkInputs.length, 1);
         assert.ok(!JSON.stringify([events, synced, session.conversationHistory]).includes('Late unqualified claim'));
         const canonical = store.db.query("SELECT title, facts, narrative FROM observations WHERE title != 'Prior verified baseline'").all();
+        if (modelEvidence) {
+          const logsDir = join(process.env.CLAUDE_MEM_DATA_DIR!, 'logs');
+          const receipts = readdirSync(logsDir).filter(name => name.endsWith('.log'))
+            .flatMap(name => readFileSync(join(logsDir, name), 'utf8').split('\n'))
+            .filter(line => line.includes('Observer model identity'));
+          assert.equal(receipts.length, 1, 'each processed assistant frame needs one INFO model receipt; retired late frames need none');
+          const receipt = receipts[0];
+          assert.match(receipt, /\[INFO\s*\]/);
+          assert.ok(receipt.includes(`workerPid=${process.pid}`));
+          assert.ok(receipt.includes(`sessionDbId=${sid}`));
+          const expectedHash = hash(replyParts.join('\n'));
+          assert.ok(receipt.includes(`responseSha256=${expectedHash}`), 'receipt must hash exact processed text, including joins, Unicode and whitespace');
+          assert.deepEqual(JSON.parse(receipt.match(/\{"requestedModel":.*\}$/)![0]), {
+            requestedModel: 'haiku',
+            reportedModel: kind === 'sdk-model-evidence-absent' ? null : 'actual-fixture-model',
+            requestedFallbackUsed: kind === 'sdk-model-evidence-absent',
+          });
+          for (const privateText of [rawReply, 'Private fixture body', 'Production checks passed', m.tool_input, m.tool_response, sdkInputs[0].text]) {
+            assert.ok(!receipt.includes(String(privateText)), 'model receipt leaked private response, prompt or tool content');
+          }
+          const row = store.db.query("SELECT generated_by_model, metadata FROM observations WHERE title != 'Prior verified baseline'").get() as any;
+          const expectedModel = kind === 'sdk-model-evidence-absent' ? 'haiku' : 'actual-fixture-model';
+          assert.equal(row.generated_by_model, expectedModel);
+          const provenance = JSON.parse(row.metadata).documentEvidence;
+          assert.equal(provenance.originalReplyHash, expectedHash);
+          assert.equal(provenance.observerModel, expectedModel);
+          assert.equal(session.lastModelId, 'haiku', 'reported identity must not change requested-model session state');
+        }
         if (kind === 'sdk-optimized') {
           assert.equal(compressionCalls, 1);
           assert.ok(sdkInputs[0].text.includes('Condensation says deployment and restart verified.'));

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-for (const kind of ['processor', 'controls', 'storage-error', 'sdk-lifecycle', 'sdk-storage-error', 'sdk-optimized', 'recovery', 'sdk-shutdown', 'sdk-provider-switch', 'sdk-auth', 'sdk-quota', 'escaped-history']) {
+for (const kind of ['processor', 'controls', 'storage-error', 'sdk-lifecycle', 'sdk-model-evidence-reported', 'sdk-model-evidence-absent', 'sdk-storage-error', 'sdk-optimized', 'recovery', 'sdk-shutdown', 'sdk-provider-switch', 'sdk-auth', 'sdk-quota', 'escaped-history']) {
   it(`document evidence integration: ${kind}`, async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'document-evidence-'));
     let child: ReturnType<typeof Bun.spawn> | undefined;
