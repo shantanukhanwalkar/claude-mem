@@ -160,8 +160,16 @@ export function buildHardenedSdkOptions(input: HardenedSdkOptionsInput): Options
     ...(input.abortController ? { abortController: input.abortController } : {}),
     ...(input.resume ? { resume: input.resume } : {}),
     ...(input.spawnClaudeCodeProcess ? { spawnClaudeCodeProcess: input.spawnClaudeCodeProcess } : {}),
-    // Observer thinking is behavior-only and does not participate in the lockdown boundary.
-    ...(input.source === 'Observer' ? { thinking: { type: 'disabled' as const } } : {}),
+    // Behavior policy, separate from the lockdown boundary below. Pin 5.5's
+    // adaptive mode and effort explicitly: the API no longer accepts disabled
+    // thinking, while the CLI may normalize/ignore that legacy control. The
+    // SDK does not expose between_tools; do not pass unsupported API fields.
+    // Preserve older models and KnowledgeAgent's existing thinking policy.
+    ...(input.source === 'Observer'
+      ? input.model === 'claude-sonnet-5-5'
+        ? { thinking: { type: 'adaptive' as const }, effort: 'high' as const }
+        : { thinking: { type: 'disabled' as const } }
+      : {}),
 
     // === Tool lockdown (defense-in-depth) ===
     tools: [],                                        // belt: disable ALL built-in tools

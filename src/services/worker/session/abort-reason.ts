@@ -20,6 +20,7 @@ export type NormalizedAbortReason =
   | 'provider_switch'
   | 'output_retry'
   | 'drift'
+  | 'context_retired'
   | typeof DEADLINE_EXCEEDED_CODE
   | 'none';
 
@@ -43,6 +44,7 @@ export const PRESERVED_ABORT_CATEGORIES: ReadonlySet<string> = new Set([
   'transport',
   'output_retry',
   'drift',
+  'context_retired',
 ]);
 
 /**
@@ -66,6 +68,7 @@ export function normalizeAbortReason(reason: string | null | undefined): Normali
     case 'provider_switch': return 'provider_switch';
     case 'output_retry': return 'output_retry';
     case 'drift': return 'drift';
+    case 'context_retired': return 'context_retired';
     default: return 'none';
   }
 }

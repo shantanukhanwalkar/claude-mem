@@ -169,6 +169,13 @@ export interface ActiveSession {
    * per-turn usage before ClaudeProvider fires it.
    */
   pendingCompressionEvent?: Record<string, unknown> | null;
+  /**
+   * A deterministic document observation replaced this generation's assistant
+   * reply. Claude's opaque SDK history still contains the rejected reply: hold
+   * the feed until the result's finalized usage is captured, then retire it.
+   * A processing failure instead exits through the existing transport recovery.
+   */
+  retireObserverContextAfterResult?: boolean;
   /** Cumulative total_cost_usd from the SDK's latest result message — per-compression cost is the delta between results. */
   lastResultTotalCostUsd?: number | null;
   /**

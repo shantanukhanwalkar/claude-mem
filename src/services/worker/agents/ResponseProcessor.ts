@@ -1,4 +1,7 @@
 
+import { createHash } from 'node:crypto';
+import { ModeManager } from '../../domain/ModeManager.js';
+import { deriveDocumentEvidence } from '../document-evidence.js';
 import { logger } from '../../../utils/logger.js';
 import { hasStorableTitle } from '../../sqlite/observations/store.js';
 import { parseAgentXml, type ParsedObservation, type ParsedSummary } from '../../../sdk/parser.js';
@@ -30,7 +33,7 @@ import type { WorkerRef, StorageResult } from './types.js';
 import { broadcastObservation, broadcastSummary } from './ObservationBroadcaster.js';
 import { telemetryBuffer } from '../../telemetry/buffer.js';
 
-type ObservationFileEvidenceMessage = Pick<PendingMessage, 'type' | 'tool_name' | 'tool_input'>;
+type ObservationFileEvidenceMessage = Pick<PendingMessage, 'type' | 'tool_name' | 'tool_input' | 'tool_response'>;
 
 export interface ObservationFileEvidence {
   files_read: string[];
@@ -40,6 +43,38 @@ export interface ObservationFileEvidence {
 const READ_TOOL_NAMES = new Set(['Read']);
 const WRITE_TOOL_NAMES = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'write_file']);
 const PATCH_TOOL_NAMES = new Set(['apply_patch']);
+
+/** Decode the single JSON layer added by ingest; never inspect file content recursively. */
+function decodeFileEvidenceCapture(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch { return value; }
+}
+
+function hasExplicitNativeFileFailure(toolName: string, outcome: unknown): boolean {
+  if (outcome && typeof outcome === 'object' && !Array.isArray(outcome)) {
+    const record = outcome as Record<string, unknown>;
+    // claudeCodeAdapter's PostToolUseFailure envelope, including interruption
+    // without error text. A nested error in a successful Read is just content.
+    if (typeof record.is_interrupt === 'boolean'
+      && Object.keys(record).every(key => key === 'error' || key === 'is_interrupt')
+      && (record.is_interrupt || typeof record.error === 'string')) return true;
+  }
+  // The same full native receipt envelope accepted by document-evidence.ts,
+  // but with a failed exit. Do not infer failure from arbitrary error prose.
+  return toolName === 'apply_patch' && typeof outcome === 'string'
+    && /^Exit code: [1-9]\d*\n(?:Wall time: (?:0|[1-9]\d{0,8})(?:\.\d{1,9})? seconds\n)?Output:\n[\s\S]*$/.test(outcome);
+}
+
+function confirmedSerializedPatchPaths(patch: string, outcome: unknown): string[] {
+  if (typeof outcome !== 'string') return [];
+  const envelope = /^Exit code: 0\n(?:Wall time: (?:0|[1-9]\d{0,8})(?:\.\d{1,9})? seconds\n)?Output:\n([\s\S]*)$/.exec(outcome);
+  const lines = (envelope ? envelope[1] : outcome).replace(/\n$/, '').split('\n');
+  if (lines.shift() !== 'Success. Updated the following files:') return [];
+  const reportedPaths = lines.map(line => /^[AMD] (.+)$/.exec(line)?.[1]);
+  if (!reportedPaths.length || reportedPaths.some(path => path === undefined)) return [];
+  const paths = parsePatchFiles(patch);
+  return paths.length === reportedPaths.length && paths.every(path => reportedPaths.includes(path)) ? paths : [];
+}
 
 export function extractObservationFileEvidence(messages: ReadonlyArray<ObservationFileEvidenceMessage>): ObservationFileEvidence {
   const filesRead: string[] = [];
@@ -56,6 +91,8 @@ export function extractObservationFileEvidence(messages: ReadonlyArray<Observati
     if (!toolName) {
       continue;
     }
+    const outcome = decodeFileEvidenceCapture(message.tool_response);
+    if (hasExplicitNativeFileFailure(toolName, outcome)) continue;
 
     if (READ_TOOL_NAMES.has(toolName)) {
       for (const filePath of extractPathsFromToolInput(message.tool_input, 'read')) {
@@ -70,7 +107,14 @@ export function extractObservationFileEvidence(messages: ReadonlyArray<Observati
     }
 
     if (PATCH_TOOL_NAMES.has(toolName)) {
-      for (const filePath of extractPatchPaths(message.tool_input)) {
+      const decodedInput = decodeFileEvidenceCapture(message.tool_input);
+      // Transcript patch strings were formerly represented by a premature
+      // synthetic write_file event. Recover them only from a matching success
+      // receipt; unwrapping unknown outcomes would newly promote intent.
+      const paths = typeof decodedInput === 'string' && decodedInput !== message.tool_input
+        ? confirmedSerializedPatchPaths(decodedInput, outcome)
+        : extractPatchPaths(message.tool_input);
+      for (const filePath of paths) {
         pushUnique(seenModified, filesModified, filePath);
       }
     }
@@ -425,7 +469,10 @@ export async function processAgentResponse(
       isAuthFailureObserverOutput(text) ||
       isTransportFailureObserverOutput(text));
 
-  if (text && !isRejectionProse) {
+  // Keep the exact slot this invocation appended: another identical reply in
+  // earlier, verified history must never be rewritten.
+  const assistantHistoryIndex = text && !isRejectionProse ? session.conversationHistory.length : -1;
+  if (assistantHistoryIndex >= 0) {
     session.conversationHistory.push({ role: 'assistant', content: text });
   }
 
@@ -627,8 +674,41 @@ export async function processAgentResponse(
 
   const { observations, summary } = parsed;
   const claimedMessages = sessionManager.getClaimedMessages(session.sessionDbId);
+  // The queue retains the original capture-sanitized payload. Field optimization
+  // only builds a separate prompt view, so its model-written condensation is
+  // never evidence for this deterministic transformation.
+  const evidence = session.lastGeneratorSource === 'ingest'
+    && observations.length > 0 && summary === null
+    // The parser selects the first root, so a later summary is not reflected
+    // in parsed.summary. Such mixed replies retain their existing behavior.
+    && !/<summary\b/i.test(text)
+    && ModeManager.getInstance().getActiveModeId?.() === 'code'
+    ? deriveDocumentEvidence(claimedMessages)
+    : null;
+  const transformed = evidence?.kind === 'eligible' ? evidence : null;
   const fileEvidence = extractObservationFileEvidence(claimedMessages);
-  const sanitizedObservations = sanitizeObservationFiles(observations, fileEvidence);
+  const sanitizedObservations = transformed
+    ? [{
+      ...transformed.observation,
+      // Store provenance, not a second copy of the raw payload or rejected reply.
+      metadata: JSON.stringify({ documentEvidence: {
+        ...transformed.provenance,
+        originalReplyHash: createHash('sha256').update(text).digest('hex'),
+        observerModel: modelId ?? null,
+      } }),
+    }]
+    : sanitizeObservationFiles(observations, fileEvidence);
+  if (transformed) {
+    if (assistantHistoryIndex >= 0) {
+      session.conversationHistory[assistantHistoryIndex] = {
+        role: 'assistant', content: sanitizedObservations.map(renderObservationXml).join('\n'),
+      };
+    }
+    // The SDK holds a separate opaque history. Fence its input immediately,
+    // including storage/ACK failure paths; after a successful ACK, the provider
+    // reads the current result's real usage and retires before releasing input.
+    if (agentName === 'SDK') session.retireObserverContextAfterResult = true;
+  }
   // Include claimed-message file evidence even for summary-only responses
   // (no parsed observations), otherwise files_read/files_edited persist as [].
   const summaryForStore = attachObservationFilesToSummary(
@@ -701,7 +781,7 @@ export async function processAgentResponse(
   session.earliestPendingTimestamp = null;
   worker?.broadcastProcessingStatus?.();
 
-  if (parsed.schemaDrift) {
+  if (parsed.schemaDrift && !transformed) {
     correctSchemaDrift(session, text, labeledObservations, parsed.schemaDrift, agentName);
   } else {
     session.consecutiveSchemaDrifts = 0;

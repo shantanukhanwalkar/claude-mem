@@ -1,4 +1,4 @@
-
+import { createHash } from 'node:crypto';
 import { DatabaseManager } from './DatabaseManager.js';
 import { SessionManager } from './SessionManager.js';
 import { logger } from '../../utils/logger.js';
@@ -323,6 +323,7 @@ export class ClaudeProvider {
   }
 
   async startSession(session: ActiveSession, worker?: WorkerRef): Promise<void> {
+    session.retireObserverContextAfterResult = false;
     const cwdTracker = { lastCwd: undefined as string | undefined };
     const observerExtraArgs = ['--no-session-persistence'];
 
@@ -556,6 +557,10 @@ export class ClaudeProvider {
           logger.debug('SDK', `[ALIGNMENT] ${previousId ? 'Updated' : 'Captured'} | contentSessionId=${session.contentSessionId} → memorySessionId=${message.session_id} | Future prompts will resume with this ID`);
         }
 
+        // More assistant frames from a transformed turn cannot contribute new
+        // claims. Only its result is allowed through to finalize real usage.
+        if (session.retireObserverContextAfterResult && message.type === 'assistant') continue;
+
         if (message.type === 'assistant') {
           const content = message.message.content;
           // A turn can arrive as several assistant messages, and a frame that
@@ -643,7 +648,20 @@ export class ClaudeProvider {
           // so a frame without one keeps the requested model, as the other
           // providers do.
           const reportedModel = message.message.model;
-          const servedModel = typeof reportedModel === 'string' && reportedModel ? reportedModel : modelId;
+          const hasReportedModel = typeof reportedModel === 'string' && reportedModel.length > 0;
+          const servedModel = hasReportedModel ? reportedModel : modelId;
+
+          // Reception evidence only: processing/storage can still fail below.
+          logger.info('SDK', 'Observer model identity', {
+            sessionId: session.sessionDbId,
+            workerPid: process.pid,
+            sessionDbId: session.sessionDbId,
+            responseSha256: createHash('sha256').update(textContent).digest('hex'),
+          }, {
+            requestedModel: modelId,
+            reportedModel: hasReportedModel ? reportedModel : null,
+            requestedFallbackUsed: !hasReportedModel,
+          });
 
           pacer.processingStarted();
           try {
@@ -804,6 +822,18 @@ export class ClaudeProvider {
           // through — XML, empty/prose, and the failed-turn re-queue above,
           // which never reaches processAgentResponse. Opening the feed per text
           // frame instead would let a multi-frame turn release it early (#4066).
+          if (session.retireObserverContextAfterResult) {
+            // Storage and queue acknowledgement succeeded before the processor
+            // returned. Never release this SDK conversation for another event:
+            // its opaque history contains the unqualified model reply.
+            session.forceInit = true;
+            // A shutdown, provider switch or another pause may have arrived
+            // while storage/ACK awaited. Retiring this opaque history must not
+            // replace that lifecycle decision or authorize a different resume.
+            session.abortReason ??= 'context_retired:document_evidence';
+            session.abortController.abort();
+            break;
+          }
           pacer.answer();
         }
       }
@@ -1186,7 +1216,7 @@ export class ClaudeProvider {
   ): Promise<boolean> {
     const stallMs = this.responseStallMs();
     const outcome = await pacer.waitForAnswer(answeredBeforeSend, session.abortController.signal, stallMs);
-    if (outcome === 'answered') return !session.abortController.signal.aborted;
+    if (outcome === 'answered') return !session.abortController.signal.aborted && !session.retireObserverContextAfterResult;
     if (outcome === 'stalled') {
       logger.warn('SDK', 'Observer prompt went unanswered; preserving the claimed batch and stopping this generation', {
         sessionId: session.sessionDbId,

@@ -102,9 +102,13 @@ export function buildFieldCompressionPrompt(text: string, budgetChars: number): 
   return `Condense the tool payload below to under ${budgetChars} characters.
 
 It is going into an observation record, so preserve everything that carries
-signal: file paths, identifiers, commands, counts, error text, status codes, and
-any concrete values a later reader would need. Drop repetition, boilerplate and
-filler. Keep the original ordering.
+signal: file paths, identifiers, commands, quantities, exact quoted values,
+error text, status codes, and meaningful guards/assertions and limitations.
+Keep values and qualifiers unchanged, including whether a claim is proposed,
+reported or observed. Do not infer unseen downstream or runtime behavior.
+Drop repetition, boilerplate and filler. Do not infer or estimate repetition totals from repeated text; without
+an explicit source total, describe repetition without a number. Keep the original
+ordering.
 
 Reply with the condensed payload only — no preamble, no commentary, no code
 fences.

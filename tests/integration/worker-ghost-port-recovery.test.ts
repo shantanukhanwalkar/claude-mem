@@ -52,7 +52,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'bun:test';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -64,6 +64,7 @@ import {
   type ProcessIdentity,
 } from './helpers/process-tree.js';
 import { classifyPostKillState } from './helpers/ghost-state.js';
+import { captureProcessStartToken } from '../../src/shared/process-identity.js';
 
 const RUN_GATE = process.env.CLAUDE_MEM_TEST_CHROMA === '1';
 
@@ -102,6 +103,9 @@ interface FixtureHandle {
 }
 
 let active: FixtureHandle | null = null;
+// Kept beyond the test body: the uvx root can exit before teardown, including
+// on the Bun >= 1.4 capability-return path where the port is already free.
+let fixtureDescendants: ProcessIdentity[] = [];
 // The detached fixture's pid, tracked from the moment Start-Process returns.
 // `active` is only assigned by the ready event, so without this a fixture that
 // hangs before readiness has no teardown handle and its tree outlives the run.
@@ -327,7 +331,7 @@ async function waitForOrphansToClear(
   return survivors;
 }
 
-afterEach(async () => {
+async function cleanupFixtureProcesses(): Promise<void> {
   // A deadline failure leaves the launcher running (the race cannot cancel
   // it). Give it a bounded moment to settle before teardown kills things, or
   // a late reclaim/spawn outlives cleanup and interferes with the next run.
@@ -389,7 +393,27 @@ afterEach(async () => {
     await new Promise(resolve => setTimeout(resolve, 2_000));
     await killPidFileWorker();
   }
-});
+}
+
+async function cleanupFixture(): Promise<void> {
+  const ownedDescendants = fixtureDescendants;
+  fixtureDescendants = [];
+  try {
+    await cleanupFixtureProcesses();
+  } finally {
+    // The root and listener can both be gone while the pre-kill sidecar
+    // identities remain alive. Reap that owned set even after an early return
+    // or a failed recovery, without signalling a process that reused a PID.
+    const { killProcessTree } = await import('../../src/shared/kill-process-tree.js');
+    for (const entry of survivingProcesses(ownedDescendants).reverse()) {
+      await killProcessTree(entry.pid, { expectedStartToken: entry.startToken }).catch(() => {});
+    }
+    const survivors = await waitForOrphansToClear(ownedDescendants, ORPHAN_SETTLE_TIMEOUT_MS);
+    expect(survivors, `ghost fixture descendants survived teardown: ${describeProcesses(survivors)}`).toEqual([]);
+  }
+}
+
+afterEach(cleanupFixture);
 
 describe.if(RUN_GATE && IS_WINDOWS)('worker recovers from a ghost listener left by an out-of-band kill', () => {
   it('reclaims the dead worker\'s sidecar chain and starts a new worker', async () => {
@@ -399,6 +423,7 @@ describe.if(RUN_GATE && IS_WINDOWS)('worker recovers from a ghost listener left 
     // Snapshot BEFORE the kill: once the root exits, identity is the only
     // way to tell the survivors apart from anything that recycled its PID.
     const snapshot = snapshotDescendants(fixture.pid);
+    fixtureDescendants = snapshot;
     expect(snapshot.length).toBeGreaterThan(0);
     const names = snapshot.map(p => p.name.toLowerCase()).join(' ');
     expect(names).toMatch(/uv|python/);
@@ -519,4 +544,47 @@ describe.if(RUN_GATE && IS_WINDOWS)('worker recovers from a ghost listener left 
     const { waitForHealth } = await import('../../src/services/infrastructure/HealthMonitor.js');
     expect(await waitForHealth(fixture.port, 90_000), 'replacement worker must answer health').toBe(true);
   }, RECOVERY_TIMEOUT_MS);
+});
+
+// No Chroma dependency: reproduce the dead-root / surviving-child shape with
+// disposable processes so teardown is exercised even without socket inheritance.
+describe.if(RUN_GATE)('ghost fixture cleanup', () => {
+  it('reaps its snapshotted descendants after the root exits and no port remains', async () => {
+    assertIsolatedDataDir();
+    // The same shell/child fixture used by the cross-platform tree-kill
+    // suite; killing only its shell leaves the long-lived child behind.
+    const root = IS_WINDOWS
+      ? spawn('cmd.exe', ['/c', 'ping -n 120 127.0.0.1 > NUL'], { stdio: 'ignore', windowsHide: true })
+      : spawn('/bin/sh', ['-c', 'sleep 120 & wait'], { stdio: 'ignore' });
+    const rootStartToken = captureProcessStartToken(root.pid!);
+    let snapshot: ProcessIdentity[] = [];
+    try {
+      expect(rootStartToken).not.toBeNull();
+      await waitFor(() => {
+        snapshot = snapshotDescendants(root.pid!);
+        return snapshot.length > 0;
+      }, 15_000, 'disposable child to start');
+      expect(snapshot.length).toBeGreaterThan(0);
+      expect(snapshot.every(entry => entry.startToken !== null)).toBe(true);
+      fixtureDescendants = snapshot;
+      spawnedFixturePid = root.pid!;
+      root.kill('SIGKILL');
+      await waitFor(() => !processExists(root.pid!), 15_000, 'disposable root to exit');
+      expect(survivingProcesses(snapshot).length).toBeGreaterThan(0);
+
+      // There is no active listener, and the tracked root is already gone.
+      // Re-walking that root cannot find the descendants this cleanup owns.
+      await cleanupFixture();
+      expect(survivingProcesses(snapshot)).toEqual([]);
+    } finally {
+      // An assertion failure must not leak the regression fixture itself.
+      const { killProcessTree } = await import('../../src/shared/kill-process-tree.js');
+      if (rootStartToken !== null) {
+        await killProcessTree(root.pid!, { expectedStartToken: rootStartToken });
+      }
+      for (const entry of survivingProcesses(snapshot).reverse()) {
+        await killProcessTree(entry.pid, { expectedStartToken: entry.startToken });
+      }
+    }
+  }, 90_000);
 });

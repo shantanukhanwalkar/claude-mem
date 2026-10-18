@@ -25,6 +25,40 @@ const oversized = { body: 'x'.repeat(MAX * 3) };
 /** A complete reply: the model stopped on its own. */
 const ok = (text: string) => ({ text, truncated: false });
 
+describe('shared helper evidence instruction contract', () => {
+  // The production builder emits instructions; these are not model-behavior tests.
+  it('preserves literal values, qualifiers, guards and claim status in the helper request', () => {
+    const payload = [
+      'run_id="run-alpha-07" warning_total=9 status="PARTIAL"',
+      'assert cached_total is not None, "missing cached total"',
+      'reported latency <= 75 ms; proposed retry limit remains unapproved',
+      'ERR_CONFIG_MISSING: optional settings are unavailable',
+    ].join('\n');
+    const prompt = buildFieldCompressionPrompt(payload, 700);
+    const [instructions, remainder] = prompt.split('<payload>\n');
+
+    expect(remainder).toBe(`${payload}\n</payload>`);
+    expect(instructions).toContain('under 700 characters');
+    expect(instructions).toContain('identifiers, commands, quantities, exact quoted values');
+    expect(instructions).toContain('error text, status codes, and meaningful guards/assertions and limitations');
+    expect(instructions).toContain('Keep values and qualifiers unchanged');
+    expect(instructions).toContain('whether a claim is proposed,\nreported or observed');
+    expect(instructions).toContain('Do not infer unseen downstream or runtime behavior');
+    expect(instructions).toContain('payload only');
+    expect(instructions).toContain('Keep the original\nordering');
+  });
+
+  it('requests nonnumeric compression of repetition without a source-supplied total', () => {
+    const payload = `${'heartbeat\n'.repeat(23)}terminal status="ready"`;
+    const [instructions, remainder] = buildFieldCompressionPrompt(payload, 400).split('<payload>\n');
+
+    expect(remainder).toBe(`${payload}\n</payload>`);
+    expect(instructions).toContain('Do not infer or estimate repetition totals from repeated text');
+    expect(instructions).toContain('an explicit source total, describe repetition without a number');
+    expect(instructions).toContain('Drop repetition, boilerplate and filler');
+  });
+});
+
 describe('oversized observation fields are condensed, not cut (#3800)', () => {
   it('leaves a field that already fits untouched, and never calls the model', async () => {
     let calls = 0;
