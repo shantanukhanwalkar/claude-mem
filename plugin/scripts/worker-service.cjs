@@ -2562,6 +2562,9 @@ If a <parameters> or <outcome> block above contains an "<elided chars=... />" ma
 ${s}
 Successful edit-only evidence: notes.md adds "deployment passed". Source per field: title "Notes updated with reported deployment", subtitle/fact "Notes report deployment passed", narrative "The edit succeeded; deployment is only reported, not independently shown here."
 Only current tool proof supports NEWLY completed actions; requests/plans/readbacks do not, and linking is not creation. Prior verified work is background; readback discoveries remain valid.
+Attribute assertions in document/issue/readback/report text, including ongoing, recurring, historical and background behavior, unless current tool evidence verifies them. Direct execution/results and returned metadata support only what they actually confirm.
+Each persisted field must stand alone: attribution in facts, another field or a final disclaimer cannot qualify an unqualified narrative clause, including relative/background clauses.
+Readback-only example: issue status is Open; description says "job runs nightly". Narrative: "The issue is Open; its description reports that the job runs nightly."
 files_read/files_modified require tool evidence of reads/changes; omit merely mentioned or planned paths.
 Return either one or more <observation>...</observation> blocks, or <skip_summary reason="noise" /> if this tool use should be skipped.
 Concrete debugging findings from logs, queue state, database rows, session routing, or code-path inspection count as durable discoveries and should be recorded.
