@@ -127,7 +127,7 @@ Hard stop: 2026-11-30 (API retirement). The CLI/OAuth route's behaviour after th
 - [ ] **Step 2: Build twice**: `npm run build && sha256sum plugin/scripts/*.cjs > /tmp/b1 && npm run build && sha256sum plugin/scripts/*.cjs | diff - /tmp/b1` → empty diff.
 - [ ] **Step 3: Confirm the inlined SDK** `grep -o 'CLAUDE_AGENT_SDK_VERSION="[^"]*"' plugin/scripts/worker-service.cjs` → `0.3.291` (the candidate's `node_modules` under `/home/sk/worktrees/claude-mem-sonnet55` holds it; copy or `bun install` with the pinned `package.json` and verify).
 - [ ] **Step 4: Run** `npm run typecheck`, `bun test tests/infrastructure`, and the focused suites from A2 → PASS.
-- [ ] **Step 5: Commit** `HAR-1138: Release 13.32.1-local.3 bundles`; push branch; open draft PR #5 against `local/stable` titled `fix(HAR-1138): declare fact basis and drop ungrounded claims`, body linking PR #4 (superseded, left frozen).
+- [ ] **Step 5: Commit** `HAR-1138: Release 13.32.1-local.3 bundles`; push branch; open a draft PR (number assigned at creation) against `local/stable` titled `fix(HAR-1138): declare fact basis and drop ungrounded claims`, body linking PR #4 (superseded, left frozen).
 - [ ] **Step 6: Wait for CI** `gh run list --branch feature/HAR-1138-claim-basis` → all six Linux jobs SUCCESS; trigger Windows via `workflow_dispatch` if the fork config allows → both jobs SUCCESS. Record run IDs in the PR body.
 
 ### Task A4: Independent review and HAR-1138 close-out
