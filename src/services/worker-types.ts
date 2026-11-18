@@ -121,10 +121,8 @@ export interface ActiveSession {
   /** Why buffered work was last parked after a generator exit. */
   pausedReason?: string | null;
   /**
-   * When buffered work was last parked (the pausedReason moment, server
-   * clock). The resume sweep uses it as the before-side of a recovery proof:
-   * an observer store that succeeded after this moment proves an auth pause's
-   * cause is gone (#5377). Cleared together with pausedReason.
+   * When the run observed an auth refusal, or parked for another reason.
+   * Only a later store can prove that a refused credential recovered.
    */
   pausedAtMs?: number | null;
   /** The provider, account and credential type captured before an auth pause; null when unknown. */

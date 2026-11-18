@@ -497,6 +497,8 @@ export async function processAgentResponse(
     }
 
     if (isAuthFailureObserverOutput(text)) {
+      // Another slot can prove recovery while this run releases its batch or exits.
+      session.pausedAtMs = Date.now();
       await sessionManager.resetProcessingToPending(session.sessionDbId);
       session.abortReason = 'auth:observer_text';
       try {

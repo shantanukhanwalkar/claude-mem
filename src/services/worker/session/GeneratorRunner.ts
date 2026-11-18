@@ -29,6 +29,9 @@ import {
 } from '../../../shared/dependency-health.js';
 import { canCmemGatewayServe } from '../../../shared/cmem-gateway.js';
 import {
+  cooldownAppliesToCurrentAccount,
+  getQuotaCooldown,
+  resolveQuotaCooldownMs,
   releaseQuotaProbe,
   recordAuthCooldown,
   recordQuotaExhausted,
@@ -39,7 +42,7 @@ import {
   DEADLINE_EXCEEDED_CODE,
   isClassified,
   describeProviderError,
-  type ClassifiedProviderError,
+  ClassifiedProviderError,
 } from '../provider-errors.js';
 
 export interface GeneratorRunnerDependencies {
@@ -399,8 +402,7 @@ export async function startGeneratorWithProvider(
       if (reason === OBSERVER_TEXT_RATE_LIMIT_ABORT_REASON && !failureBooked) {
         // Apply the same short cooldown as a thrown throttle without Retry-After.
         const message = 'The observer replied that the provider rate limited the request (429)';
-        recordQuotaExhausted(provider, message, 'rate_limit', undefined, session.observerProfile);
-        recordObserverFailure(provider, { message, kind: 'rate_limit' });
+        bookClassifiedFailure(session, provider, new ClassifiedProviderError(message, { kind: 'rate_limit', cause: null }));
         if (quotaServingProvider(provider) !== null) {
           scheduledResume = { afterMs: 0, source: 'provider-fallback' };
         }
@@ -551,6 +553,15 @@ function bookClassifiedFailure(
       recordAuthCooldown(provider, error.message, session.observerProfile);
       break;
     case 'rate_limit': {
+      // A throttle from an overlapping request must not replace a weekly or
+      // auth hold. A late reply from a different profile also leaves the
+      // selected account's active breaker and diagnostic intact.
+      const held = getQuotaCooldown(provider);
+      if (held && Date.now() < held.armedAtMs + resolveQuotaCooldownMs(held.window)) {
+        const current = cooldownAppliesToCurrentAccount(held);
+        const sameAccount = session.observerProfile === undefined ? current : held.profile === session.observerProfile;
+        if (sameAccount ? held.window !== 'rate_limit' : current) return null;
+      }
       // Never a spent allowance: a limit that names a day or longer is
       // classified quota_exhausted by the provider (Gemini's per-day quotaId,
       // OpenRouter's free-models-per-day). The provider already retried in

@@ -734,10 +734,17 @@ describe('contract 6 — a generator that throws, seen from the runner', () => {
     await sdk().until(() => sdk().prompts.length === 1, 'init');
     sdk().answer(SKIP_REPLY);
     await sdk().until(() => sdk().prompts.length === 2, 'first observation');
+    // Hold this run between observing the refusal and parking the session.
+    // Another SDK slot can store successfully while the old run unwinds.
+    const releaseBatch = paused.sessionManager.resetProcessingToPending.bind(paused.sessionManager);
+    let finishRelease!: () => void;
+    const releasing = new Promise<void>(resolve => { finishRelease = resolve; });
+    const reset = spyOn(paused.sessionManager, 'resetProcessingToPending').mockImplementation(async id => {
+      await releasing;
+      return releaseBatch(id);
+    });
     sdk().answer('Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.');
-    await withTimeout(paused.session.generatorPromise!, 'OAuth pause');
-    expect(paused.session.pausedReason).toBe('auth');
-    expect(paused.sessionManager.getResumableSessionIds()).toEqual([]);
+    await sdk().until(() => reset.mock.calls.length > 0, 'OAuth refusal');
 
     currentSdk = null;
     await fresh.routes.ensureGeneratorRunning(6122, 'observation');
@@ -749,6 +756,10 @@ describe('contract 6 — a generator that throws, seen from the runner', () => {
     expect(paused.sessionManager.getResumableSessionIds()).toEqual([]);
     sdk().answer('<observation><type>discovery</type><title>Restored capture</title></observation>');
     await sdk().until(() => !fresh.sessionManager.getTotalQueueDepth(), 'store');
+    finishRelease();
+    await withTimeout(paused.session.generatorPromise!, 'OAuth pause');
+    reset.mockRestore();
+    expect(paused.session.pausedReason).toBe('auth');
     expect(paused.sessionManager.getTotalQueueDepth()).toBe(1);
     expect(paused.sessionManager.getResumableSessionIds()).toEqual([6121]);
 
