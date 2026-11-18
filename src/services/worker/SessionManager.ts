@@ -8,6 +8,7 @@ import { getSupervisor } from '../../supervisor/index.js';
 import { telemetryBuffer } from '../telemetry/buffer.js';
 import { deliverSessionWrapup, type TelegramWrapupFormatter } from '../integrations/TelegramWrapupNotifier.js';
 import { MAX_LLM_TIMEOUT_MS, resolveLlmTimeoutMs } from './retry.js';
+import { readObserverHealth } from '../../shared/observer-health.js';
 import { canCmemGatewayServe } from '../../shared/cmem-gateway.js';
 import { planUnattendedGatewayResume, unattendedGatewayResumesSpent } from './session/response-pacer.js';
 
@@ -770,10 +771,24 @@ export class SessionManager {
    *  - an observer that spent its overflow recycles (`overflowPausedUntilMs`):
    *    a message that fits no generation aborts again on every retry, which
    *    the sweep repeated every cooldown, forever.
+   *
+   * An auth pause is the one timer-less case that can still join the sweep:
+   * a store under the same captured credential scope after the session
+   * paused is proof the credential works again (#5377), so that session is
+   * retried within the same pacing as any other — its provider's breaker
+   * still gates it.
    */
   getResumableSessionIds(includeOperatorOnly: boolean = false): number[] {
     const automaticallyRetryable = new Set([null, undefined, 'quota', 'rate_limit', 'overflow', 'provider_switch', 'response_stall']);
     const memoryOnCmemGateway = !includeOperatorOnly && canCmemGatewayServe();
+    // An outage can park many sessions. Read the ledger once per sweep, only
+    // when a session has a credential identity that could prove recovery.
+    let scopedSuccesses: Record<string, number> | undefined;
+    const recoveredAuthPause = (session: ActiveSession): boolean => {
+      if (session.pausedReason !== 'auth' || session.pausedAtMs == null || !session.pausedAuthScope) return false;
+      scopedSuccesses ??= readObserverHealth()?.authRecoverySuccesses ?? {};
+      return (scopedSuccesses[session.pausedAuthScope] ?? 0) > session.pausedAtMs;
+    };
     return Array.from(this.sessions.values())
       .filter(session => !session.generatorPromise
         && this.buffer.getPendingCount(session.sessionDbId) > 0
@@ -781,7 +796,8 @@ export class SessionManager {
         && (includeOperatorOnly || session.overflowPausedUntilMs === undefined)
         && (includeOperatorOnly || session.scheduledResumeTimer === undefined)
         && (includeOperatorOnly || !(memoryOnCmemGateway && unattendedGatewayResumesSpent(session)))
-        && (includeOperatorOnly || automaticallyRetryable.has(session.pausedReason)))
+        && (includeOperatorOnly || automaticallyRetryable.has(session.pausedReason)
+          || recoveredAuthPause(session)))
       .map(session => session.sessionDbId);
   }
 

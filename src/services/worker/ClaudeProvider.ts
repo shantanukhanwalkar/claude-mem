@@ -8,8 +8,9 @@ import { USER_SETTINGS_PATH, OBSERVER_WORKING_DIRECTORY_ERROR_PREFIX, paths } fr
 import {
   buildIsolatedEnvWithFreshOAuth,
   getAuthMethodDescription,
-  resolveConfigDirProfileKey,
+  credentialProfileKey,
 } from '../../shared/EnvManager.js';
+import { claudeCloudBilling } from '../../shared/observed-billing.js';
 import { findClaudeExecutable } from '../../shared/find-claude-executable.js';
 import type { ActiveSession, SDKUserMessage } from '../worker-types.js';
 import { ModeManager } from '../domain/ModeManager.js';
@@ -388,7 +389,14 @@ export class ClaudeProvider {
       // its OAuth identity) is fixed at spawn, even if the setting changes
       // while it runs. Quota snapshots are tagged with it and checked against
       // it, and a refusal it hits arms the breaker under it.
-      const observerProfile = resolveConfigDirProfileKey();
+      const configDir = isolatedEnv.CLAUDE_CONFIG_DIR;
+      const observerProfile = configDir
+        ? credentialProfileKey({ configDir, explicitConfigDir: true })
+        : 'default';
+      // Gateways and external cloud accounts have no comparable local credential.
+      if (!isolatedEnv.ANTHROPIC_BASE_URL && !isolatedEnv.ANTHROPIC_AUTH_TOKEN && !claudeCloudBilling(isolatedEnv)) {
+        session.observerAuth = isolatedEnv.ANTHROPIC_API_KEY ? 'api-key' : 'subscription';
+      }
       session.observerProfile = observerProfile;
 
       logger.info('SDK', 'Starting SDK query', {

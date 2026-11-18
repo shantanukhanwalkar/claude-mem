@@ -8,9 +8,9 @@ import type { OpenRouterProvider } from '../OpenRouterProvider.js';
 import type { OpenAICompatProvider } from '../OpenAICompatProvider.js';
 import type { CodexProvider } from '../CodexProvider.js';
 import type { SessionCompletionHandler } from './SessionCompletionHandler.js';
-import { recordCmemFallbackIfEligible, releaseCmemGatewayProbe, type SelectableProvider } from '../provider-dispatch.js';
+import { quotaServingProvider, recordCmemFallbackIfEligible, releaseCmemGatewayProbe, type SelectableProvider } from '../provider-dispatch.js';
 import { handleGeneratorExit } from './GeneratorExitHandler.js';
-import { normalizeAbortReason } from './abort-reason.js';
+import { normalizeAbortReason, OBSERVER_TEXT_RATE_LIMIT_ABORT_REASON } from './abort-reason.js';
 import {
   MAX_CONSECUTIVE_STALL_RESUMES,
   RESPONSE_STALL_RESUME_DELAY_MS,
@@ -122,6 +122,8 @@ export async function startGeneratorWithProvider(
   // too, its exit records a fresh reason. Without this, one auth pause would
   // keep the session out of every automatic sweep for good.
   session.pausedReason = null;
+  session.pausedAtMs = null;
+  session.pausedAuthScope = null;
 
   if (session.abortController.signal.aborted) {
     logger.debug('SESSION', 'Resetting aborted AbortController before starting generator', {
@@ -159,6 +161,8 @@ export async function startGeneratorWithProvider(
   });
 
   session.currentProvider = provider;
+  session.observerProfile = undefined;
+  session.observerAuth = undefined;
   session.lastGeneratorActivity = Date.now();
   // Providers refine this per-prompt ('init'|'ingest'|'summarize'); this is
   // the fallback when a generator dies before dispatching its first prompt.
@@ -391,6 +395,15 @@ export async function startGeneratorWithProvider(
         // class: the allowance is spent, no observation will ever store, and
         // the user is told nothing.
         recordObserverFailure(provider, pause);
+      }
+      if (reason === OBSERVER_TEXT_RATE_LIMIT_ABORT_REASON && !failureBooked) {
+        // Apply the same short cooldown as a thrown throttle without Retry-After.
+        const message = 'The observer replied that the provider rate limited the request (429)';
+        recordQuotaExhausted(provider, message, 'rate_limit', undefined, session.observerProfile);
+        recordObserverFailure(provider, { message, kind: 'rate_limit' });
+        if (quotaServingProvider(provider) !== null) {
+          scheduledResume = { afterMs: 0, source: 'provider-fallback' };
+        }
       }
       // A signed-out Claude observer answers with the CLI's own prose ("Not
       // logged in · Please run /login"). ResponseProcessor resets the batch to

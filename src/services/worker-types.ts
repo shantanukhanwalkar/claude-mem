@@ -36,6 +36,7 @@ export interface ActiveSession {
    * changed while it ran.
    */
   observerProfile?: string;
+  observerAuth?: 'subscription' | 'api-key';
   consecutiveRestarts: number;
   /**
    * Rejected replies (neither observation/summary XML nor the
@@ -119,6 +120,15 @@ export interface ActiveSession {
   abortReason?: 'idle' | 'shutdown' | 'overflow' | 'restart-guard' | 'quota' | 'provider_switch' | string | null;
   /** Why buffered work was last parked after a generator exit. */
   pausedReason?: string | null;
+  /**
+   * When buffered work was last parked (the pausedReason moment, server
+   * clock). The resume sweep uses it as the before-side of a recovery proof:
+   * an observer store that succeeded after this moment proves an auth pause's
+   * cause is gone (#5377). Cleared together with pausedReason.
+   */
+  pausedAtMs?: number | null;
+  /** The provider, account and credential type captured before an auth pause; null when unknown. */
+  pausedAuthScope?: string | null;
   respawnTimer?: ReturnType<typeof setTimeout>;
   /** When the latest compression prompt was dispatched to the model — telemetry compression_ms. */
   lastPromptSentAt?: number | null;

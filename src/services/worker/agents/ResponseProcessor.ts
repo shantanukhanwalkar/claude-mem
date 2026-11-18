@@ -7,6 +7,7 @@ import {
   isAuthFailureObserverOutput,
   isContextOverflowObserverOutput,
   isQuotaLimitedObserverOutput,
+  isRateLimitedObserverOutput,
   isTransportFailureObserverOutput,
   previewOutput,
 } from '../../../sdk/output-classifier.js';
@@ -17,8 +18,9 @@ import { notifyGrokBotBrainbeat } from '../../integrations/GrokBotBrainbeat.js';
 import { notifyGrokBotIndex } from '../../integrations/GrokBotIndexWriter.js';
 import { updateFolderClaudeMdFiles } from '../../../utils/claude-md-utils.js';
 import { getWorkerPort } from '../../../shared/worker-utils.js';
-import { recordObserverFailure, recordObserverSuccess } from '../../../shared/observer-health.js';
+import { observerAuthScope, recordObserverFailure, recordObserverSuccess } from '../../../shared/observer-health.js';
 import { clearQuotaCooldown } from '../../../shared/quota-cooldown.js';
+import { OBSERVER_TEXT_RATE_LIMIT_ABORT_REASON } from '../session/abort-reason.js';
 import { recycleObserverConversation } from '../session/recycle-conversation.js';
 import { clearRejectedOutput, recordRejectedOutput } from '../session/OutputRecovery.js';
 import { SettingsDefaultsManager } from '../../../shared/SettingsDefaultsManager.js';
@@ -422,6 +424,7 @@ export async function processAgentResponse(
     !!text &&
     (isContextOverflowObserverOutput(text) ||
       isQuotaLimitedObserverOutput(text) ||
+      isRateLimitedObserverOutput(text) ||
       isAuthFailureObserverOutput(text) ||
       isTransportFailureObserverOutput(text));
 
@@ -462,6 +465,28 @@ export async function processAgentResponse(
 
       await sessionManager.resetProcessingToPending(session.sessionDbId);
       session.abortReason = 'quota:observer_text';
+      try {
+        session.abortController.abort();
+      } catch {
+        // best-effort; AbortController.abort() should not throw in normal use.
+      }
+      worker?.broadcastProcessingStatus?.();
+      return null;
+    }
+
+    // A 429 the CLI wrote as the reply (#5428). The provider never ran the
+    // batch, so confirming it would lose the work; it is a throttle, not a
+    // spent allowance, so it pauses under its own 'rate_limit' category and
+    // the runner books the short rate-limit window a thrown 429 gets.
+    if (isRateLimitedObserverOutput(text)) {
+      logger.warn('PARSER', `${agentName} returned a rate-limit reply — pausing generator and preserving queued batch`, {
+        sessionId: session.sessionDbId,
+        outputClass: 'prose',
+        preview: previewOutput(text),
+      });
+
+      await sessionManager.resetProcessingToPending(session.sessionDbId);
+      session.abortReason = OBSERVER_TEXT_RATE_LIMIT_ABORT_REASON;
       try {
         session.abortController.abort();
       } catch {
@@ -754,7 +779,7 @@ export async function processAgentResponse(
   // in query using the admitted cooldown identity: storing an earlier response
   // here must not erase a newer failure from a concurrent pool slot.
   if (result.observationIds.length > 0 || result.summaryId !== null) {
-    recordObserverSuccess();
+    recordObserverSuccess(undefined, observerAuthScope(session.currentProvider, session.observerProfile, session.observerAuth));
     if (session.currentProvider && session.currentProvider !== 'codex') {
       clearQuotaCooldown(session.currentProvider);
     }

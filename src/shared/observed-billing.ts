@@ -54,6 +54,13 @@ function isTruthyEnv(value: string | undefined): boolean {
   return normalized !== '' && normalized !== '0' && normalized !== 'false';
 }
 
+/** Cloud backends use their own credentials even when a local Claude login is available. */
+export function claudeCloudBilling(env: NodeJS.ProcessEnv): 'bedrock' | 'vertex' | 'foundry' | undefined {
+  if (isTruthyEnv(env.CLAUDE_CODE_USE_BEDROCK)) return 'bedrock';
+  if (isTruthyEnv(env.CLAUDE_CODE_USE_VERTEX)) return 'vertex';
+  if (isTruthyEnv(env.CLAUDE_CODE_USE_FOUNDRY)) return 'foundry';
+}
+
 /** Keep only the billing fields; drop everything else from the parsed file. */
 function projectBillingFields(parsed: unknown): ClaudeJsonBillingFields {
   if (!parsed || typeof parsed !== 'object') return {};
@@ -120,9 +127,8 @@ export function detectObservedBilling(
   env: NodeJS.ProcessEnv = process.env,
   claudeJsonFile: string = claudeJsonPath(env),
 ): ObservedBilling {
-  if (isTruthyEnv(env.CLAUDE_CODE_USE_BEDROCK)) return 'bedrock';
-  if (isTruthyEnv(env.CLAUDE_CODE_USE_VERTEX)) return 'vertex';
-  if (isTruthyEnv(env.CLAUDE_CODE_USE_FOUNDRY)) return 'foundry';
+  const cloud = claudeCloudBilling(env);
+  if (cloud) return cloud;
 
   const fields = readClaudeJsonBillingFields(claudeJsonFile);
   const hasAccount = !!fields.oauthAccount;
