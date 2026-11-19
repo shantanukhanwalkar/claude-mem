@@ -8,9 +8,9 @@ import type { OpenRouterProvider } from '../OpenRouterProvider.js';
 import type { OpenAICompatProvider } from '../OpenAICompatProvider.js';
 import type { CodexProvider } from '../CodexProvider.js';
 import type { SessionCompletionHandler } from './SessionCompletionHandler.js';
-import { recordCmemFallbackIfEligible, releaseCmemGatewayProbe, type SelectableProvider } from '../provider-dispatch.js';
+import { quotaServingProvider, recordCmemFallbackIfEligible, releaseCmemGatewayProbe, type SelectableProvider } from '../provider-dispatch.js';
 import { handleGeneratorExit } from './GeneratorExitHandler.js';
-import { normalizeAbortReason } from './abort-reason.js';
+import { normalizeAbortReason, OBSERVER_TEXT_RATE_LIMIT_ABORT_REASON } from './abort-reason.js';
 import {
   MAX_CONSECUTIVE_STALL_RESUMES,
   RESPONSE_STALL_RESUME_DELAY_MS,
@@ -29,6 +29,9 @@ import {
 } from '../../../shared/dependency-health.js';
 import { canCmemGatewayServe } from '../../../shared/cmem-gateway.js';
 import {
+  cooldownAppliesToCurrentAccount,
+  getQuotaCooldown,
+  resolveQuotaCooldownMs,
   releaseQuotaProbe,
   recordAuthCooldown,
   recordQuotaExhausted,
@@ -39,7 +42,7 @@ import {
   DEADLINE_EXCEEDED_CODE,
   isClassified,
   describeProviderError,
-  type ClassifiedProviderError,
+  ClassifiedProviderError,
 } from '../provider-errors.js';
 
 export interface GeneratorRunnerDependencies {
@@ -122,6 +125,8 @@ export async function startGeneratorWithProvider(
   // too, its exit records a fresh reason. Without this, one auth pause would
   // keep the session out of every automatic sweep for good.
   session.pausedReason = null;
+  session.pausedAtMs = null;
+  session.pausedAuthScope = null;
 
   if (session.abortController.signal.aborted) {
     logger.debug('SESSION', 'Resetting aborted AbortController before starting generator', {
@@ -159,6 +164,8 @@ export async function startGeneratorWithProvider(
   });
 
   session.currentProvider = provider;
+  session.observerProfile = undefined;
+  session.observerAuth = undefined;
   session.lastGeneratorActivity = Date.now();
   // Providers refine this per-prompt ('init'|'ingest'|'summarize'); this is
   // the fallback when a generator dies before dispatching its first prompt.
@@ -392,6 +399,14 @@ export async function startGeneratorWithProvider(
         // the user is told nothing.
         recordObserverFailure(provider, pause);
       }
+      if (reason === OBSERVER_TEXT_RATE_LIMIT_ABORT_REASON && !failureBooked) {
+        // Apply the same short cooldown as a thrown throttle without Retry-After.
+        const message = 'The observer replied that the provider rate limited the request (429)';
+        bookClassifiedFailure(session, provider, new ClassifiedProviderError(message, { kind: 'rate_limit', cause: null }));
+        if (quotaServingProvider(provider) !== null) {
+          scheduledResume = { afterMs: 0, source: 'provider-fallback' };
+        }
+      }
       // A signed-out Claude observer answers with the CLI's own prose ("Not
       // logged in · Please run /login"). ResponseProcessor resets the batch to
       // pending and aborts with 'auth:observer_text' rather than throwing, so
@@ -538,6 +553,15 @@ function bookClassifiedFailure(
       recordAuthCooldown(provider, error.message, session.observerProfile);
       break;
     case 'rate_limit': {
+      // A throttle from an overlapping request must not replace a weekly or
+      // auth hold. A late reply from a different profile also leaves the
+      // selected account's active breaker and diagnostic intact.
+      const held = getQuotaCooldown(provider);
+      if (held && Date.now() < held.armedAtMs + resolveQuotaCooldownMs(held.window)) {
+        const current = cooldownAppliesToCurrentAccount(held);
+        const sameAccount = session.observerProfile === undefined ? current : held.profile === session.observerProfile;
+        if (sameAccount ? held.window !== 'rate_limit' : current) return null;
+      }
       // Never a spent allowance: a limit that names a day or longer is
       // classified quota_exhausted by the provider (Gemini's per-day quotaId,
       // OpenRouter's free-models-per-day). The provider already retried in

@@ -692,7 +692,9 @@ describe('contract 6 — a generator that throws, seen from the runner', () => {
         getPromptNumberFromUserPrompts: () => 1,
         ensureMemorySessionIdRegistered: (_id: number, memoryId: string) => memoryId,
         updateMemorySessionId: () => {},
-        storeObservations: () => ({ observationIds: [1], summaryId: null, createdAtEpoch: Date.now() }),
+        storeObservations: (_id: string, _project: string, observations: unknown[]) => ({
+          observationIds: observations.map((_, i) => i + 1), summaryId: null, createdAtEpoch: Date.now(),
+        }),
         linkToolUsesToObservation: () => 0,
       }),
       getChromaSync: () => null,
@@ -721,6 +723,58 @@ describe('contract 6 — a generator that throws, seen from the runner', () => {
     );
     return { routes, session, sessionManager, finalizeCalls: () => finalizeCalls };
   }
+
+  it('resumes the preserved OAuth batch after a second SDK session stores a memory', async () => {
+    const paused = await buildRoutesWithRealProvider(6121);
+    const fresh = await buildRoutesWithRealProvider(6122);
+    liveSessions.push(paused.session, fresh.session);
+
+    await paused.routes.ensureGeneratorRunning(6121, 'observation');
+    await sdkStarted();
+    await sdk().until(() => sdk().prompts.length === 1, 'init');
+    sdk().answer(SKIP_REPLY);
+    await sdk().until(() => sdk().prompts.length === 2, 'first observation');
+    // Hold this run between observing the refusal and parking the session.
+    // Another SDK slot can store successfully while the old run unwinds.
+    const releaseBatch = paused.sessionManager.resetProcessingToPending.bind(paused.sessionManager);
+    let finishRelease!: () => void;
+    const releasing = new Promise<void>(resolve => { finishRelease = resolve; });
+    const reset = spyOn(paused.sessionManager, 'resetProcessingToPending').mockImplementation(async id => {
+      await releasing;
+      return releaseBatch(id);
+    });
+    sdk().answer('Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.');
+    await sdk().until(() => reset.mock.calls.length > 0, 'OAuth refusal');
+
+    currentSdk = null;
+    await fresh.routes.ensureGeneratorRunning(6122, 'observation');
+    await sdkStarted();
+    await sdk().until(() => sdk().prompts.length === 1, 'fresh init');
+    sdk().frame({ type: 'system', subtype: 'init', session_id: 'fresh-memory' });
+    sdk().answer(SKIP_REPLY);
+    await sdk().until(() => sdk().prompts.length === 2, 'fresh observation');
+    expect(paused.sessionManager.getResumableSessionIds()).toEqual([]);
+    sdk().answer('<observation><type>discovery</type><title>Restored capture</title></observation>');
+    await sdk().until(() => !fresh.sessionManager.getTotalQueueDepth(), 'store');
+    finishRelease();
+    await withTimeout(paused.session.generatorPromise!, 'OAuth pause');
+    reset.mockRestore();
+    expect(paused.session.pausedReason).toBe('auth');
+    expect(paused.sessionManager.getTotalQueueDepth()).toBe(1);
+    expect(paused.sessionManager.getResumableSessionIds()).toEqual([6121]);
+
+    fresh.session.abortController.abort();
+    await fresh.session.generatorPromise;
+    currentSdk = null;
+    expect(paused.routes.resumePendingSessions('periodic-resume')).toBe(1);
+    await sdkStarted();
+    await sdk().until(() => sdk().prompts.length === 1, 'recovery init');
+    sdk().answer(SKIP_REPLY);
+    await sdk().until(() => sdk().prompts.length === 2, 'preserved observation');
+    expect(sdk().prompts[1]).toContain('step 0');
+    paused.session.abortController.abort();
+    await paused.session.generatorPromise;
+  });
 
   it('an Invalid API key status line is booked as the refused credential it is, not paused as transport', async () => {
     // Captured at booking time, before the runner's finally consumes abortReason.

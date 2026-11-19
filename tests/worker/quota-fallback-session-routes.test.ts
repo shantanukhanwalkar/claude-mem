@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, afterAll, spyOn } from 'bun:test';
 import type { ActiveSession } from '../../src/services/worker-types.js';
 import { logger } from '../../src/utils/logger.js';
-import { clearQuotaCooldown, recordQuotaExhausted, resetQuotaCooldownsForTesting } from '../../src/shared/quota-cooldown.js';
+import { clearQuotaCooldown, getQuotaCooldown, recordAuthCooldown, recordQuotaExhausted, resetQuotaCooldownsForTesting } from '../../src/shared/quota-cooldown.js';
 import { resetDependencyStatusesForTesting } from '../../src/shared/dependency-health.js';
 import { resetQuotaFallbackStateForTesting } from '../../src/services/worker/provider-dispatch.js';
 
@@ -164,6 +164,52 @@ describe('quota fallback in SessionRoutes', () => {
   // The quota breaker is process-global; see overflow-recycle-resume.test.ts.
   afterAll(() => {
     resetQuotaCooldownsForTesting();
+  });
+
+  it.each([false, true])('books a 429 reply on the short cooldown (fallback enabled: %s)', async withFallback => {
+    pin({
+      CLAUDE_MEM_PROVIDER: 'claude',
+      CLAUDE_MEM_QUOTA_FALLBACK_PROVIDER: withFallback ? 'gemini' : 'off',
+      CLAUDE_MEM_GEMINI_API_KEY: 'test-key',
+    });
+    const session = makeSession();
+    let fallbackStarts = 0;
+    const { routes } = buildRoutes(session, {
+      claude: async s => {
+        s.abortReason = 'rate_limit:observer_text';
+        s.abortController.abort();
+      },
+      gemini: async () => { fallbackStarts++; await hang(); },
+    });
+    await routes.ensureGeneratorRunning(session.sessionDbId, 'observation');
+    await session.generatorPromise;
+    await nextTick();
+
+    expect(getQuotaCooldown('claude')?.window).toBe('rate_limit');
+    expect(fallbackStarts).toBe(withFallback ? 1 : 0);
+    if (!withFallback) {
+      expect(session.pausedReason).toBe('rate_limit');
+      await expectNoResume(routes);
+    }
+  });
+
+  it.each(['auth', 'seven_day'])('keeps a concurrent %s hold when a running slot receives a text 429', async hold => {
+    pin({ CLAUDE_MEM_PROVIDER: 'claude', CLAUDE_MEM_QUOTA_FALLBACK_PROVIDER: 'off' });
+    const session = makeSession();
+    const { routes } = buildRoutes(session, {
+      claude: async s => {
+        if (hold === 'auth') recordAuthCooldown('claude', 'credential refused');
+        else recordQuotaExhausted('claude', 'weekly reserve', 'seven_day');
+        s.abortReason = 'rate_limit:observer_text';
+        s.abortController.abort();
+      },
+      gemini: hang,
+    });
+    await routes.ensureGeneratorRunning(session.sessionDbId, 'observation');
+    await session.generatorPromise;
+    const cooldown = getQuotaCooldown('claude');
+    expect(cooldown?.cause ?? cooldown?.window).toBe(hold);
+    await expectNoResume(routes);
   });
 
   it('resumes work paused by a quota exit onto the fallback on the next sweep, with no further hook event', async () => {
